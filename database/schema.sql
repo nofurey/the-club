@@ -20,6 +20,7 @@ CREATE TYPE prize_award_status AS ENUM ('pending', 'allocated', 'recalculated');
 
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  auth_subject TEXT UNIQUE,
   email TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
   phone_number TEXT,
@@ -92,6 +93,13 @@ CREATE TABLE contributions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   version INT NOT NULL DEFAULT 1
+);
+
+CREATE TABLE contribution_photos (
+  contribution_id UUID PRIMARY KEY REFERENCES contributions(id) ON DELETE CASCADE,
+  content_type TEXT NOT NULL CHECK (content_type IN ('image/jpeg', 'image/png', 'image/webp')),
+  data BYTEA NOT NULL CHECK (octet_length(data) BETWEEN 1 AND 5242880),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE number_sets (

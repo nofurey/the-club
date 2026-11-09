@@ -38,6 +38,7 @@ jspm_packages/
 
 # TypeScript / JavaScript build outputs
 dist/
+dist-web/
 build/
 out/
 

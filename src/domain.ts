@@ -29,6 +29,7 @@ export type PrizeAwardStatus = "pending" | "allocated" | "recalculated";
 
 export interface User {
   id: string;
+  authSubject?: string | null;
   email: string;
   displayName: string;
   phoneNumber?: string | null;
@@ -103,6 +104,7 @@ export interface Contribution {
   drawingCount: number;
   numberSets: NumberSet[] | Record<string, unknown>[];
   ticketImageUrl?: string | null;
+  hasTicketPhoto?: boolean;
   costUsd: number;
   status: ContributionStatus;
   createdAt: string;

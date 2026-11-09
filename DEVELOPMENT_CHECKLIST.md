@@ -12,8 +12,8 @@
 - [x] Fetch Michigan Lottery rules and results through its public GraphQL endpoint; retain source documents and hashes.
 - [x] Fetch Powerball and Mega Millions next-drawing jackpot estimates and cash values; store them on the matching drawing with source metadata.
 - [x] Make official-data refreshes idempotent and clear stale awards when normalized rules or results change.
-- [x] Verify with `npm run typecheck` and `npm test` (29 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
-- [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations, persistence, and target discovery ran in a temporary schema).
+- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (50 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
+- [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations, OIDC user linking, API overview/contribution operations, and refresh target discovery ran in a temporary schema).
 - [x] Fix PostgreSQL enum parameter inference in the drawing-status update.
 - [x] Smoke-test both jackpot/cash endpoints against their live next-drawing dates.
 - [x] Apply migrations 001 through 003 to the local PostgreSQL database.
@@ -25,9 +25,32 @@
 - [x] Install and run the local user systemd unit; verify journal collection and successful refresh events.
 - [x] Add systemd templates, protected environment examples, and optional failure-webhook alerts.
 - [x] Deliver a Discord test alert, move the webhook URL into the mode-600 local environment file, and sanitize tracked examples.
+- [x] Build a responsive React frontend with overview, contributions, results, and members views plus a typed demo API and contribution form.
+- [x] Add an OIDC Authorization Code + PKCE frontend client and authenticated Fastify API routes for club overview and contribution creation.
+- [x] Verify bearer JWT signature, issuer, audience, HTTPS JWKS use, and verified-email claims.
+- [x] Resolve missing access-token identity claims through OIDC UserInfo with subject matching and verified-email enforcement.
+- [x] Add auth-subject migration 004 and Postgres user linking/API repository support.
+- [x] Apply migration 004 to the local PostgreSQL database.
+- [x] Prepare a local Keycloak realm, SPA client, and API audience configuration.
+- [x] Start Keycloak and verify its local OIDC discovery document.
+- [x] Configure local API/frontend OIDC environment and start API plus Vite under the user's local systemd/dev processes.
+- [x] Sign in with a verified Keycloak user and receive the authenticated club overview in the browser.
+- [x] Verify authenticated overview/contribution persistence against local PostgreSQL.
+- [x] Populate ticket entry from member-scoped drawing schedules and saved official pricing and number rules; show unavailable pricing explicitly.
+- [x] Add optional ticket photo upload and member-only viewing, backed by migration 005 and PostgreSQL storage.
+- [x] Support multiple plays per ticket with per-play pricing and rules-aware number selection.
+- [x] Add locally executed ticket-photo OCR with editable suggestions and required user confirmation.
+- [x] Add opt-in, browser-local OCR correction learning and a photo-storage disclaimer.
+- [x] Distinguish pending results, pending calculations, calculated results, and recalculations in the results view.
+- [x] Replace implicit demo mode with authenticated HTTP by default; keep demo preview explicit for development.
+- [x] Build the frontend production bundle and audit production dependencies (0 vulnerabilities).
 
 ## Remaining
 
+- [ ] Populate future drawing schedules and official pricing for clubs before their first contribution.
+- [ ] Add contribution editing and audited recalculation for past or changed entries.
+- [ ] Run drawing calculations after official results are refreshed and expose awards and payout allocations.
+- [ ] Add club creation, discovery, membership management, and club switching to the authenticated API and frontend.
 - [ ] Monitor the site-owned API response formats and confirm permitted use before production reliance; these endpoints are not documented public APIs.
 - [ ] Define retention and cleanup for raw source documents and historical calculation artifacts.
 - [ ] Add notification delivery and recalculation notices after payout calculations complete.

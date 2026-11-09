@@ -45,6 +45,7 @@ export const PrizeAwardStatusSchema = z.enum([
 
 export const UserSchema = z.object({
   id: z.string().uuid(),
+  authSubject: z.string().min(1).nullable().optional(),
   email: z.string().email(),
   displayName: z.string().trim().min(1),
   phoneNumber: z.string().nullable().optional(),
@@ -119,6 +120,7 @@ export const ContributionSchema = z.object({
   drawingCount: z.number().int().min(1),
   numberSets: z.array(z.unknown()).min(1),
   ticketImageUrl: z.string().url().nullable().optional(),
+  hasTicketPhoto: z.boolean().optional(),
   costUsd: z.number().positive(),
   status: ContributionStatusSchema.default("submitted"),
   createdAt: z.string().datetime(),

@@ -1,0 +1,27 @@
+[Unit]
+Description=The Club authenticated API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/repos/the-club
+Environment=NODE_ENV=production
+EnvironmentFile=%h/.config/the-club/api.env
+EnvironmentFile=%h/.config/the-club/refresh.env
+UnsetEnvironment=REFRESH_ALERT_WEBHOOK_URL
+ExecStart=%h/repos/the-club/node_modules/.bin/tsx src/api/main.ts
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
