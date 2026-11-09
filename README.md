@@ -15,6 +15,77 @@ Multi-draw contributions are matched against the ordered drawing schedule for th
 
 The same provider fetches the next-drawing jackpot and cash value from the first-party endpoints used by the Powerball and Mega Millions pages. Estimates are saved on the matching `drawings` row as `estimated_jackpot` and `cash_value`, alongside the source URL, raw response, SHA-256, and capture time. Estimates are only attached when the source's announced drawing date matches the requested drawing; Mega Millions estimates also require its `Verified` flag.
 
+## Scheduled Official-Data Refresh
+
+`PostgresOfficialDataRefreshTargetSource` selects active clubs with contributions covering unresolved recent drawings or each lottery's next scheduled drawing, using the Eastern calendar date. `OfficialDataRefreshJob` can run once with `runOnce()` or periodically with `start()`/`stop()`. It deduplicates targets, prevents overlapping runs, spaces target starts, retries failures with bounded exponential backoff, and emits structured events through `onEvent` for monitoring. Defaults are a 24-hour interval, a 30-day unresolved-results lookback, three attempts, and one second between target refreshes.
+
+Run the standalone worker with `DATABASE_URL` set using `npm run refresh:official-data`. It performs an initial refresh, then runs every 24 hours, and handles `SIGINT`/`SIGTERM` for graceful shutdown. Run it under a process manager in production; it emits structured JSON logs, but external log aggregation and alerting still need to be configured.
+
+For a local smoke test, `database/dev-seed-official-refresh.sql` idempotently creates a demo club, members, upcoming drawings, and multi-draw contributions for both supported lotteries. With `PGPASSWORD` and `DATABASE_URL` set in the shell, run:
+
+```bash
+psql -h 127.0.0.1 -U the_club -d the_club -W -v ON_ERROR_STOP=1 -f database/dev-seed-official-refresh.sql
+npm run refresh:official-data:once
+```
+
+The one-shot command runs a single refresh without starting another daily worker.
+
+## Linux Deployment
+
+### Local user service
+
+For a local machine with systemd enabled for your user, install the rootless unit:
+
+Edit the copied environment file to set `PGPASSWORD` before enabling or starting the service. Set `REFRESH_ALERT_WEBHOOK_URL` only when you have a monitoring endpoint; keep the file private and never commit it.
+
+```bash
+mkdir -p ~/.config/systemd/user ~/.config/the-club
+cp deploy/systemd/user/the-club-refresh.service ~/.config/systemd/user/
+cp deploy/systemd/user/refresh.env.example ~/.config/the-club/refresh.env
+chmod 600 ~/.config/the-club/refresh.env
+nano ~/.config/the-club/refresh.env
+systemctl --user daemon-reload
+systemctl --user enable --now the-club-refresh.service
+systemctl --user status the-club-refresh.service
+journalctl --user -u the-club-refresh.service -f
+```
+
+The unit starts immediately and then refreshes daily. If the user manager does not persist after logout, an administrator must enable lingering for the account. On the current local machine, the unit is already linked and enabled but left inactive until its environment file is configured; start it with `systemctl --user start the-club-refresh.service` after replacing the password placeholder.
+
+### System service
+
+`deploy/systemd/the-club-refresh.service` is a systemd template for a dedicated `the-club` service user and an install at `/opt/the-club/current`; adjust those values for the target host. It restarts on process failure and sends the worker's structured stdout/stderr to journald. The worker handles `SIGTERM` for graceful shutdown.
+
+Copy `deploy/systemd/refresh.env.example` to `/etc/the-club/refresh.env`, set `DATABASE_URL`, `PGPASSWORD`, and optionally `REFRESH_ALERT_WEBHOOK_URL`, and restrict the file to root (`chmod 600`). Install and start the unit:
+
+```bash
+sudo install -d -m 0700 /etc/the-club
+sudo cp deploy/systemd/refresh.env.example /etc/the-club/refresh.env
+sudo chmod 600 /etc/the-club/refresh.env
+sudoedit /etc/the-club/refresh.env
+sudo install -m 0644 deploy/systemd/the-club-refresh.service /etc/systemd/system/the-club-refresh.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now the-club-refresh
+journalctl -u the-club-refresh -f
+```
+
+When configured, Discord webhooks receive a Discord-formatted message for failed runs or targets only. Other HTTP(S) webhooks receive JSON `{ "type": "official_data_refresh_failure", "event": ... }`. Delivery errors are logged to journald and are not retried.
+
+Install and run the oneshot alert-test unit to verify the configured endpoint without touching the database:
+
+```bash
+cp deploy/systemd/user/the-club-refresh-alert-test.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user start the-club-refresh-alert-test.service
+journalctl --user -u the-club-refresh-alert-test.service -n 20
+```
+
+Successful delivery logs `alert_test_delivered`; an HTTP or network failure causes the oneshot unit to fail and logs `alert_delivery_failed`.
+
 Wire `new OfficialLotteryDataService(repository, new MichiganLotteryGraphqlProvider())` and call `refreshDrawing({ drawingId, clubId })` to fetch, validate, and store the normalized data and raw GraphQL responses. The canonical game page and exact API document URL, retrieval metadata, and SHA-256 hashes are retained. Repeated identical fetches are deduplicated; changed normalized rules or results clear stale awards and reopen the result for calculation.
 
 Apply `database/migrations/002_official_data_sources.sql` and `database/migrations/003_drawing_jackpot_estimates.sql` after the initial schema migration. The provider does not substitute the current estimated jackpot for a historical draw's jackpot. If the API omits draw-specific payout rows or jackpot estimates, those values remain absent; prize calculation must wait for an official value rather than infer one from a generic prize table.
+
+## PostgreSQL Integration Test
+
+Set `TEST_DATABASE_URL` to a dedicated local test database and run `npm run test:postgres`. The test creates a uniquely named temporary schema, applies migrations 001 through 003 there, exercises the Postgres repository, and drops only that schema. It does not modify the database's public schema. Set `PGPASSWORD` in the shell rather than embedding credentials in the URL.

@@ -5,7 +5,11 @@
   "type": "commonjs",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "test:postgres": "tsx --test src/services/postgres-club-repository.integration.test.ts",
+    "refresh:official-data": "tsx src/jobs/official-data-refresh.ts",
+    "refresh:official-data:alert-test": "tsx src/jobs/official-data-refresh.ts --test-alert",
+    "refresh:official-data:once": "tsx src/jobs/official-data-refresh.ts --once"
   },
   "dependencies": {
     "pg": "^8.13.0",

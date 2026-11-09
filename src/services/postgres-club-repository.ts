@@ -43,7 +43,7 @@ export class PostgresClubRepository implements ClubRepository {
           updated_at,
           closed_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        RETURNING *
+        RETURNING *, supported_lotteries::text[] AS supported_lotteries
       `,
       [
         club.id,
@@ -84,7 +84,7 @@ export class PostgresClubRepository implements ClubRepository {
           updated_at = $12,
           closed_at = $13
         WHERE id = $1
-        RETURNING *
+        RETURNING *, supported_lotteries::text[] AS supported_lotteries
       `,
       [
         club.id,
@@ -108,7 +108,7 @@ export class PostgresClubRepository implements ClubRepository {
 
   async findClubById(clubId: string): Promise<Club | null> {
     const { rows } = await this.client.query(
-      "SELECT * FROM clubs WHERE id = $1 LIMIT 1",
+      "SELECT *, supported_lotteries::text[] AS supported_lotteries FROM clubs WHERE id = $1 LIMIT 1",
       [clubId]
     );
 
@@ -126,6 +126,65 @@ export class PostgresClubRepository implements ClubRepository {
       [lottery]
     );
     return rows.map(PostgresClubRepository.toDrawing);
+  }
+
+  async findOfficialDataRefreshTargets(
+    asOfDate: string,
+    lookbackDays = 30
+  ): Promise<Array<{ drawingId: string; clubId: string }>> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(asOfDate)) {
+      throw new Error("Refresh target date must use YYYY-MM-DD format.");
+    }
+    if (!Number.isInteger(lookbackDays) || lookbackDays < 0) {
+      throw new Error("Refresh target lookback must be a nonnegative integer.");
+    }
+
+    const { rows } = await this.client.query(
+      `
+        WITH ranked_drawings AS (
+          SELECT
+            id,
+            lottery,
+            drawing_date,
+            ROW_NUMBER() OVER (PARTITION BY lottery ORDER BY drawing_date) AS draw_sequence
+          FROM drawings
+        ),
+        next_drawings AS (
+          SELECT DISTINCT ON (lottery) id, lottery
+          FROM ranked_drawings
+          WHERE drawing_date >= $1::date
+          ORDER BY lottery, drawing_date
+        )
+        SELECT DISTINCT d.id AS drawing_id, c.id AS club_id, d.drawing_date
+        FROM clubs c
+        JOIN ranked_drawings d ON d.lottery = ANY(c.supported_lotteries)
+        LEFT JOIN drawing_results r ON r.drawing_id = d.id AND r.club_id = c.id
+        WHERE c.status = 'active'
+          AND EXISTS (
+            SELECT 1
+            FROM contributions contribution
+            JOIN ranked_drawings start_drawing
+              ON start_drawing.lottery = contribution.lottery
+             AND start_drawing.drawing_date = contribution.drawing_date
+            WHERE contribution.club_id = c.id
+              AND contribution.lottery = d.lottery
+              AND contribution.status NOT IN ('draft', 'archived')
+              AND start_drawing.draw_sequence <= d.draw_sequence
+              AND start_drawing.draw_sequence + contribution.drawing_count > d.draw_sequence
+          )
+          AND (
+            (
+              d.drawing_date BETWEEN $1::date - $2::int AND $1::date
+              AND (r.id IS NULL OR r.status IN ('pending', 'results_posted'))
+            )
+            OR d.id = (SELECT next_drawing.id FROM next_drawings next_drawing WHERE next_drawing.lottery = d.lottery)
+          )
+        ORDER BY d.drawing_date, c.id
+      `,
+      [asOfDate, lookbackDays]
+    );
+
+    return rows.map((row) => ({ drawingId: row.drawing_id, clubId: row.club_id }));
   }
 
   async findDrawingResultByDrawingAndClub(drawingId: string, clubId: string): Promise<DrawingResult | null> {
@@ -293,14 +352,17 @@ export class PostgresClubRepository implements ClubRepository {
       await this.client.query(
         `
           UPDATE drawings
-          SET status = $2,
+          SET status = CASE
+                WHEN $2 THEN 'results_posted'::drawing_status
+                ELSE 'pending'::drawing_status
+              END,
               official_result_posted_at = CASE
-                WHEN $2 = 'results_posted' THEN COALESCE($3, official_result_posted_at)
+                WHEN $2 THEN COALESCE($3, official_result_posted_at)
                 ELSE NULL
               END
           WHERE id = $1
         `,
-        [snapshot.drawingId, storedResult.officialWinningNumbers ? "results_posted" : "pending", officialResultPostedAt]
+        [snapshot.drawingId, Boolean(storedResult.officialWinningNumbers), officialResultPostedAt]
       );
 
       let drawingSizeUpdated = false;
