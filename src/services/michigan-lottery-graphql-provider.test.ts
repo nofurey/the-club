@@ -39,6 +39,13 @@ function jsonResponse(data: unknown): Response {
   });
 }
 
+function htmlResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
 test("fetches and normalizes Powerball rules and result data from Michigan GraphQL", async () => {
   const requests: Array<{ body: any; headers: Headers }> = [];
   const fetcher: typeof fetch = async (_input, init) => {
@@ -127,4 +134,51 @@ test("normalizes Mega Millions bonus number and returns pending draws as no resu
   assert.equal((rules.rules.priceSnapshot.numberRules as any).mainNumberMax, 70);
   assert.equal((rules.rules.priceSnapshot.numberRules as any).bonusNumberMax, 24);
   assert.equal(result.result, null);
+});
+
+test("fetches Powerball jackpot and cash value only for the announced next draw", async () => {
+  const fragment = `<h5 class="title-date">Mon, Nov 9, 2026</h5>
+    <div id="nextDraw" data-drawdateutc="2026-11-10T03:59:00.0000000Z"></div>
+    <span>Estimated Jackpot</span><span class="game-jackpot-number">$30 Million</span>
+    <span>Cash Value</span><span class="game-jackpot-number">$12.9 Million</span>`;
+  const provider = new MichiganLotteryGraphqlProvider(async () => htmlResponse(fragment));
+
+  const requestedDrawing = { ...drawing, drawingDate: "2026-11-09" };
+  const estimate = await provider.fetchDrawingSize(requestedDrawing);
+  const otherDrawing = await provider.fetchDrawingSize({ ...requestedDrawing, drawingDate: "2026-11-11" });
+
+  assert.deepEqual(estimate?.size, {
+    drawingDate: "2026-11-09",
+    estimatedJackpot: 30000000,
+    cashValue: 12900000,
+  });
+  assert.equal(estimate?.document.url, "https://www.powerball.com/v1/gameapi/next-drawing?gamecode=powerball&language=en");
+  assert.equal(otherDrawing, null);
+});
+
+test("fetches verified Mega Millions jackpot and cash values for the announced draw", async () => {
+  const provider = new MichiganLotteryGraphqlProvider(async (input, init) => {
+    assert.equal(String(input), "https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData");
+    assert.equal(init?.method, "POST");
+    assert.equal(init?.body, "{}");
+    return jsonResponse({
+      d: JSON.stringify({
+        NextDrawingDate: "2026-11-10T23:00:00",
+        Jackpot: {
+          Verified: true,
+          NextPrizePool: 529000000,
+          NextCashValue: 224200000,
+        },
+      }),
+    });
+  });
+  const megaDrawing = { ...drawing, lottery: "mega_millions" as const, drawingDate: "2026-11-10" };
+
+  const estimate = await provider.fetchDrawingSize(megaDrawing);
+
+  assert.deepEqual(estimate?.size, {
+    drawingDate: "2026-11-10",
+    estimatedJackpot: 529000000,
+    cashValue: 224200000,
+  });
 });

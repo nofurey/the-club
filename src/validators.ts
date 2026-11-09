@@ -133,6 +133,13 @@ export const DrawingSchema = z.object({
   state: z.string().min(1),
   cutoffTimeEt: z.string().regex(/^\d{2}:\d{2}:\d{2}$/),
   officialResultPostedAt: z.string().datetime().nullable().optional(),
+  estimatedJackpot: z.number().nonnegative().nullable().optional(),
+  cashValue: z.number().nonnegative().nullable().optional(),
+  drawingSizeSourceUrl: z.string().url().nullable().optional(),
+  drawingSizeSourceContentType: z.string().nullable().optional(),
+  drawingSizeSourceDocument: z.string().nullable().optional(),
+  drawingSizeSourceSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  drawingSizeCapturedAt: z.string().datetime().nullable().optional(),
   status: DrawingStatusSchema.default("pending"),
   createdAt: z.string().datetime(),
 });

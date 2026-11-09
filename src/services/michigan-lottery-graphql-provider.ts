@@ -13,6 +13,8 @@ import type { Drawing } from "../domain";
 
 const API_URL = "https://www.michiganlottery.com/api";
 const SOURCE_HOST = "www.michiganlottery.com";
+const POWERBALL_HOST = "www.powerball.com";
+const MEGA_MILLIONS_HOST = "www.megamillions.com";
 const GAME_PAGE_URLS: Record<LotteryType, string> = {
   powerball: "https://www.michiganlottery.com/games/powerball",
   mega_millions: "https://www.michiganlottery.com/games/mega-millions",
@@ -105,6 +107,84 @@ export class MichiganLotteryGraphqlProvider implements OfficialLotteryProvider {
     const winningNumbers = response.data.winningNumbers;
     const result = this.parseResult(winningNumbers, response.data.payout, drawing.lottery);
     return { document, result };
+  }
+
+  async fetchDrawingSize(drawing: Drawing): Promise<{
+    document: OfficialSourceDocument;
+    size: { drawingDate: string; estimatedJackpot: number; cashValue: number };
+  } | null> {
+    if (drawing.lottery === "powerball") {
+      const url = new URL("https://www.powerball.com/v1/gameapi/next-drawing");
+      url.searchParams.set("gamecode", "powerball");
+      url.searchParams.set("language", "en");
+      const document = await this.fetchSourceDocument(url.href, POWERBALL_HOST, {
+        method: "GET",
+        headers: { Accept: "text/html" },
+        redirect: "error",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      const drawDateUtc = document.body.match(/data-drawdateutc=["']([^"']+)["']/i)?.[1];
+      if (!drawDateUtc) {
+        throw new Error("Powerball next-drawing response is missing its drawing date.");
+      }
+      const drawingDate = this.dateAtTimeZone(drawDateUtc, "America/New_York");
+      if (drawingDate !== drawing.drawingDate) {
+        return null;
+      }
+
+      const estimatedJackpot = this.parsePowerballDisplayedAmount(
+        this.captureDisplayedAmount(document.body, "Estimated Jackpot")
+      );
+      const cashValue = this.parsePowerballDisplayedAmount(
+        this.captureDisplayedAmount(document.body, "Cash Value")
+      );
+      return { document, size: { drawingDate, estimatedJackpot, cashValue } };
+    }
+
+    const url = "https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData";
+    const document = await this.fetchSourceDocument(url, MEGA_MILLIONS_HOST, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8", Accept: "application/json" },
+      body: "{}",
+      redirect: "error",
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    let response: Record<string, any>;
+    try {
+      response = JSON.parse(document.body);
+    } catch {
+      throw new Error("Mega Millions jackpot response is not valid JSON.");
+    }
+    if (typeof response.d !== "string") {
+      throw new Error("Mega Millions jackpot response is missing its data payload.");
+    }
+
+    let payload: Record<string, any>;
+    try {
+      payload = JSON.parse(response.d);
+    } catch {
+      throw new Error("Mega Millions jackpot data payload is not valid JSON.");
+    }
+    const jackpot = payload.Jackpot;
+    if (!this.isRecord(jackpot) || jackpot.Verified !== true) {
+      return null;
+    }
+    if (typeof payload.NextDrawingDate !== "string" || !/^\d{4}-\d{2}-\d{2}/.test(payload.NextDrawingDate)) {
+      throw new Error("Mega Millions jackpot response is missing its next drawing date.");
+    }
+    const drawingDate = payload.NextDrawingDate.slice(0, 10);
+    if (drawingDate !== drawing.drawingDate) {
+      return null;
+    }
+
+    return {
+      document,
+      size: {
+        drawingDate,
+        estimatedJackpot: this.readNonnegativeAmount(jackpot.NextPrizePool, "NextPrizePool"),
+        cashValue: this.readNonnegativeAmount(jackpot.NextCashValue, "NextCashValue"),
+      },
+    };
   }
 
   private async executeGraphql(
@@ -347,14 +427,82 @@ export class MichiganLotteryGraphqlProvider implements OfficialLotteryProvider {
     return typeof value === "string" ? value : "";
   }
 
-  private toDocument(body: string, contentType: string | null): OfficialSourceDocument {
+  private async fetchSourceDocument(
+    url: string,
+    expectedHost: string,
+    init: RequestInit
+  ): Promise<OfficialSourceDocument> {
+    const response = await this.fetcher(url, init);
+    if (!response.ok) {
+      throw new Error(`Official jackpot request failed with HTTP ${response.status}.`);
+    }
+    const responseUrl = response.url || url;
+    if (new URL(responseUrl).hostname !== expectedHost) {
+      throw new Error("Official jackpot response redirected outside its source host.");
+    }
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > this.maxResponseBytes) {
+      throw new Error("Official jackpot response exceeds the configured size limit.");
+    }
+    const body = await response.text();
+    if (new TextEncoder().encode(body).byteLength > this.maxResponseBytes) {
+      throw new Error("Official jackpot response exceeds the configured size limit.");
+    }
+    return this.toDocument(body, response.headers.get("content-type"), responseUrl);
+  }
+
+  private toDocument(body: string, contentType: string | null, url = API_URL): OfficialSourceDocument {
     return {
-      url: API_URL,
+      url,
       contentType,
       body,
       sha256: createHash("sha256").update(body, "utf8").digest("hex"),
       fetchedAt: this.now().toISOString(),
     };
+  }
+
+  private captureDisplayedAmount(body: string, label: string): string {
+    const match = body.match(new RegExp(
+      `${label}[\\s\\S]{0,800}?game-jackpot-number[^>]*>([^<]+)<`,
+      "i"
+    ));
+    if (!match) {
+      throw new Error(`Powerball next-drawing response is missing ${label}.`);
+    }
+    return match[1].trim();
+  }
+
+  private parsePowerballDisplayedAmount(value: string): number {
+    const match = value.match(/^\$\s*([\d,]+(?:\.\d+)?)\s*(million|billion)?$/i);
+    if (!match) {
+      throw new Error("Powerball returned an unrecognized jackpot amount.");
+    }
+    const multiplier = match[2]?.toLowerCase() === "billion" ? 1000000000 :
+      match[2]?.toLowerCase() === "million" ? 1000000 : 1;
+    return Number(match[1].replace(/,/g, "")) * multiplier;
+  }
+
+  private readNonnegativeAmount(value: unknown, name: string): number {
+    const amount = typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : value;
+    if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+      throw new Error(`Mega Millions ${name} must be a positive number.`);
+    }
+    return amount;
+  }
+
+  private dateAtTimeZone(timestamp: string, timeZone: string): string {
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) {
+      throw new Error("Powerball next-drawing response has an invalid drawing date.");
+    }
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
   }
 
   private isRecord(value: unknown): value is Record<string, any> {

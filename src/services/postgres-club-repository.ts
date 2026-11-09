@@ -4,6 +4,7 @@ import type {
   ClubMembership,
   Contribution,
   Drawing,
+  DrawingSizeSnapshot,
   DrawingResult,
   LotteryType,
   PayoutConfiguration,
@@ -146,8 +147,15 @@ export class PostgresClubRepository implements ClubRepository {
   async storeOfficialData(
     snapshot: CalculationSnapshot,
     result: DrawingResult,
-    officialResultPostedAt: string | null
-  ): Promise<{ snapshot: CalculationSnapshot; result: DrawingResult; rulesChanged: boolean; resultChanged: boolean }> {
+    officialResultPostedAt: string | null,
+    drawingSize: DrawingSizeSnapshot | null = null
+  ): Promise<{
+    snapshot: CalculationSnapshot;
+    result: DrawingResult;
+    rulesChanged: boolean;
+    resultChanged: boolean;
+    drawingSizeUpdated: boolean;
+  }> {
     await this.client.query("BEGIN");
     try {
       const { rows: latestSnapshotRows } = await this.client.query(
@@ -295,8 +303,46 @@ export class PostgresClubRepository implements ClubRepository {
         [snapshot.drawingId, storedResult.officialWinningNumbers ? "results_posted" : "pending", officialResultPostedAt]
       );
 
+      let drawingSizeUpdated = false;
+      if (drawingSize) {
+        const { rows: drawingRows } = await this.client.query("SELECT * FROM drawings WHERE id = $1 LIMIT 1", [snapshot.drawingId]);
+        if (!drawingRows[0]) {
+          throw new Error("Drawing not found while storing jackpot estimate.");
+        }
+        const previousDrawing = PostgresClubRepository.toDrawing(drawingRows[0]);
+        if (previousDrawing.drawingDate !== drawingSize.drawingDate) {
+          throw new Error("Jackpot estimate drawing date does not match the stored drawing.");
+        }
+        drawingSizeUpdated = previousDrawing.estimatedJackpot !== drawingSize.estimatedJackpot ||
+          previousDrawing.cashValue !== drawingSize.cashValue ||
+          previousDrawing.drawingSizeSourceSha256 !== drawingSize.sourceSha256;
+        await this.client.query(
+          `
+            UPDATE drawings
+            SET estimated_jackpot = $2,
+                cash_value = $3,
+                drawing_size_source_url = $4,
+                drawing_size_source_content_type = $5,
+                drawing_size_source_document = $6,
+                drawing_size_source_sha256 = $7,
+                drawing_size_captured_at = $8
+            WHERE id = $1
+          `,
+          [
+            snapshot.drawingId,
+            drawingSize.estimatedJackpot,
+            drawingSize.cashValue,
+            drawingSize.sourceUrl,
+            drawingSize.sourceContentType,
+            drawingSize.sourceDocument,
+            drawingSize.sourceSha256,
+            drawingSize.capturedAt,
+          ]
+        );
+      }
+
       await this.client.query("COMMIT");
-      return { snapshot: storedSnapshot, result: storedResult, rulesChanged, resultChanged };
+      return { snapshot: storedSnapshot, result: storedResult, rulesChanged, resultChanged, drawingSizeUpdated };
     } catch (error) {
       await this.client.query("ROLLBACK");
       throw error;
@@ -609,6 +655,15 @@ export class PostgresClubRepository implements ClubRepository {
       cutoffTimeEt: row.cutoff_time_et,
       officialResultPostedAt: row.official_result_posted_at
         ? PostgresClubRepository.toIsoString(row.official_result_posted_at)
+        : null,
+      estimatedJackpot: row.estimated_jackpot == null ? null : Number(row.estimated_jackpot),
+      cashValue: row.cash_value == null ? null : Number(row.cash_value),
+      drawingSizeSourceUrl: row.drawing_size_source_url ?? null,
+      drawingSizeSourceContentType: row.drawing_size_source_content_type ?? null,
+      drawingSizeSourceDocument: row.drawing_size_source_document ?? null,
+      drawingSizeSourceSha256: row.drawing_size_source_sha256 ?? null,
+      drawingSizeCapturedAt: row.drawing_size_captured_at
+        ? PostgresClubRepository.toIsoString(row.drawing_size_captured_at)
         : null,
       status: row.status,
       createdAt: PostgresClubRepository.toIsoString(row.created_at),

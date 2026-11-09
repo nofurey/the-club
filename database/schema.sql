@@ -109,6 +109,13 @@ CREATE TABLE drawings (
   state TEXT NOT NULL,
   cutoff_time_et TIME NOT NULL,
   official_result_posted_at TIMESTAMPTZ,
+  estimated_jackpot NUMERIC(18,2),
+  cash_value NUMERIC(18,2),
+  drawing_size_source_url TEXT,
+  drawing_size_source_content_type TEXT,
+  drawing_size_source_document TEXT,
+  drawing_size_source_sha256 TEXT,
+  drawing_size_captured_at TIMESTAMPTZ,
   status drawing_status NOT NULL DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (lottery, drawing_date)

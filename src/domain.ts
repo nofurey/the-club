@@ -117,8 +117,26 @@ export interface Drawing {
   state: string;
   cutoffTimeEt: string;
   officialResultPostedAt?: string | null;
+  estimatedJackpot?: number | null;
+  cashValue?: number | null;
+  drawingSizeSourceUrl?: string | null;
+  drawingSizeSourceContentType?: string | null;
+  drawingSizeSourceDocument?: string | null;
+  drawingSizeSourceSha256?: string | null;
+  drawingSizeCapturedAt?: string | null;
   status: DrawingStatus;
   createdAt: string;
+}
+
+export interface DrawingSizeSnapshot {
+  drawingDate: string;
+  estimatedJackpot: number;
+  cashValue: number;
+  sourceUrl: string;
+  sourceContentType: string | null;
+  sourceDocument: string;
+  sourceSha256: string;
+  capturedAt: string;
 }
 
 export interface CalculationSnapshot {

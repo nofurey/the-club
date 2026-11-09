@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { newDb } from "pg-mem";
-import type { CalculationSnapshot, DrawingResult, PrizeAward } from "../domain";
+import type { CalculationSnapshot, DrawingResult, DrawingSizeSnapshot, PrizeAward } from "../domain";
 
 import { ClubService } from "./club-service";
 import { PostgresClubRepository } from "./postgres-club-repository";
@@ -111,6 +111,13 @@ async function setup() {
       state TEXT NOT NULL,
       cutoff_time_et TIME NOT NULL,
       official_result_posted_at TIMESTAMPTZ,
+      estimated_jackpot NUMERIC(18,2),
+      cash_value NUMERIC(18,2),
+      drawing_size_source_url TEXT,
+      drawing_size_source_content_type TEXT,
+      drawing_size_source_document TEXT,
+      drawing_size_source_sha256 TEXT,
+      drawing_size_captured_at TIMESTAMPTZ,
       status drawing_status NOT NULL DEFAULT 'pending',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -416,11 +423,27 @@ test("Postgres repository deduplicates snapshots and invalidates awards when off
     officialSourceDocument: '{"numbers":[1,2,3,4,5]}',
     officialSourceSha256: "b".repeat(64),
   };
+  const drawingSize: DrawingSizeSnapshot = {
+    drawingDate: "2026-11-07",
+    estimatedJackpot: 30000000,
+    cashValue: 12900000,
+    sourceUrl: "https://www.powerball.com/v1/gameapi/next-drawing?gamecode=powerball&language=en",
+    sourceContentType: "text/html; charset=utf-8",
+    sourceDocument: "<div>Estimated Jackpot $30 Million; Cash Value $12.9 Million</div>",
+    sourceSha256: "e".repeat(64),
+    capturedAt: now,
+  };
 
-  const first = await repo.storeOfficialData(snapshot, result, now);
+  const first = await repo.storeOfficialData(snapshot, result, now, drawingSize);
   assert.equal(first.rulesChanged, true);
   assert.equal(first.resultChanged, true);
+  assert.equal(first.drawingSizeUpdated, true);
   assert.equal(first.result.sourceSnapshotId, first.snapshot.id);
+  const storedDrawing = await repo.findDrawingById(drawingId);
+  assert.equal(storedDrawing?.estimatedJackpot, 30000000);
+  assert.equal(storedDrawing?.cashValue, 12900000);
+  assert.equal(storedDrawing?.drawingSizeSourceUrl, drawingSize.sourceUrl);
+  assert.equal(storedDrawing?.drawingSizeSourceSha256, drawingSize.sourceSha256);
 
   const award: PrizeAward = {
     id: "award-1",
@@ -439,10 +462,16 @@ test("Postgres repository deduplicates snapshots and invalidates awards when off
   };
   await repo.replacePrizeAwardsAndCompleteResult(first.result.id, [award], "calculated", now);
 
-  const repeated = await repo.storeOfficialData({ ...snapshot, id: "snapshot-duplicate" }, { ...result, id: "result-duplicate" }, now);
+  const repeated = await repo.storeOfficialData(
+    { ...snapshot, id: "snapshot-duplicate" },
+    { ...result, id: "result-duplicate" },
+    now,
+    drawingSize
+  );
   assert.equal(repeated.snapshot.id, first.snapshot.id);
   assert.equal(repeated.rulesChanged, false);
   assert.equal(repeated.resultChanged, false);
+  assert.equal(repeated.drawingSizeUpdated, false);
   assert.equal(repeated.result.status, "calculated");
   const { rows: retainedAwards } = await client.query("SELECT id FROM prize_awards WHERE drawing_result_id = $1", [first.result.id]);
   assert.equal(retainedAwards.length, 1);

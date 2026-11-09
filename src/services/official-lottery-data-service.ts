@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   CalculationSnapshot,
   Drawing,
+  DrawingSizeSnapshot,
   DrawingResult,
   LotteryType,
 } from "../domain";
@@ -50,6 +51,7 @@ export interface FetchedOfficialResult {
 export interface OfficialLotteryProvider {
   fetchRules(lottery: LotteryType): Promise<FetchedOfficialRules>;
   fetchResult(drawing: Drawing): Promise<FetchedOfficialResult>;
+  fetchDrawingSize?(drawing: Drawing): Promise<{ document: OfficialSourceDocument; size: Omit<DrawingSizeSnapshot, "sourceUrl" | "sourceContentType" | "sourceDocument" | "sourceSha256" | "capturedAt"> } | null>;
 }
 
 export interface OfficialDataRepository {
@@ -57,8 +59,15 @@ export interface OfficialDataRepository {
   storeOfficialData(
     snapshot: CalculationSnapshot,
     result: DrawingResult,
-    officialResultPostedAt: string | null
-  ): Promise<{ snapshot: CalculationSnapshot; result: DrawingResult; rulesChanged: boolean; resultChanged: boolean }>;
+    officialResultPostedAt: string | null,
+    drawingSize: DrawingSizeSnapshot | null
+  ): Promise<{
+    snapshot: CalculationSnapshot;
+    result: DrawingResult;
+    rulesChanged: boolean;
+    resultChanged: boolean;
+    drawingSizeUpdated: boolean;
+  }>;
 }
 
 export interface OfficialDataRefreshInput {
@@ -71,6 +80,7 @@ export interface OfficialDataRefreshResult {
   result: DrawingResult;
   rulesChanged: boolean;
   resultChanged: boolean;
+  drawingSizeUpdated: boolean;
 }
 
 export interface HttpOfficialLotteryProviderOptions {
@@ -253,9 +263,10 @@ export class OfficialLotteryDataService {
       throw new Error("Drawing not found.");
     }
 
-    const [fetchedRules, fetchedResult] = await Promise.all([
+    const [fetchedRules, fetchedResult, fetchedDrawingSize] = await Promise.all([
       this.provider.fetchRules(drawing.lottery),
       this.provider.fetchResult(drawing),
+      this.provider.fetchDrawingSize ? this.provider.fetchDrawingSize(drawing) : Promise.resolve(null),
     ]);
     if (
       typeof fetchedRules.rules.version !== "string" ||
@@ -270,6 +281,17 @@ export class OfficialLotteryDataService {
     if (officialResult) {
       this.validateOfficialResult(officialResult);
       this.prizeEvaluator.validateOfficialNumbers(officialResult.winningNumbers, fetchedRules.rules.priceSnapshot);
+    }
+
+    if (fetchedDrawingSize && fetchedDrawingSize.size.drawingDate !== drawing.drawingDate) {
+      throw new Error("Official jackpot estimate is for a different drawing date.");
+    }
+    if (
+      fetchedDrawingSize &&
+      (!Number.isFinite(fetchedDrawingSize.size.estimatedJackpot) || fetchedDrawingSize.size.estimatedJackpot <= 0 ||
+        !Number.isFinite(fetchedDrawingSize.size.cashValue) || fetchedDrawingSize.size.cashValue <= 0)
+    ) {
+      throw new Error("Official jackpot estimate contains invalid values.");
     }
 
     const snapshot: CalculationSnapshot = {
@@ -304,7 +326,18 @@ export class OfficialLotteryDataService {
       officialSourceSha256: fetchedResult.document.sha256,
     };
 
-    return this.repository.storeOfficialData(snapshot, result, officialResult?.postedAt ?? null);
+    const drawingSize: DrawingSizeSnapshot | null = fetchedDrawingSize
+      ? {
+          ...fetchedDrawingSize.size,
+          sourceUrl: fetchedDrawingSize.document.url,
+          sourceContentType: fetchedDrawingSize.document.contentType,
+          sourceDocument: fetchedDrawingSize.document.body,
+          sourceSha256: fetchedDrawingSize.document.sha256,
+          capturedAt: fetchedDrawingSize.document.fetchedAt,
+        }
+      : null;
+
+    return this.repository.storeOfficialData(snapshot, result, officialResult?.postedAt ?? null, drawingSize);
   }
 
   private validateOfficialResult(result: ParsedOfficialResult): void {

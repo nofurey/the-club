@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CalculationSnapshot, Drawing, DrawingResult } from "../domain";
+import type { CalculationSnapshot, Drawing, DrawingResult, DrawingSizeSnapshot } from "../domain";
 import {
   HttpOfficialLotteryProvider,
   OfficialLotteryDataService,
@@ -49,15 +49,20 @@ const definition: OfficialLotterySourceDefinition = {
 };
 
 class TestOfficialDataRepository implements OfficialDataRepository {
-  readonly saved: Array<{ snapshot: CalculationSnapshot; result: DrawingResult }> = [];
+  readonly saved: Array<{ snapshot: CalculationSnapshot; result: DrawingResult; drawingSize: DrawingSizeSnapshot | null }> = [];
 
   async findDrawingById(drawingId: string) {
     return drawingId === drawing.id ? drawing : null;
   }
 
-  async storeOfficialData(snapshot: CalculationSnapshot, result: DrawingResult) {
-    this.saved.push({ snapshot, result });
-    return { snapshot, result, rulesChanged: true, resultChanged: true };
+  async storeOfficialData(
+    snapshot: CalculationSnapshot,
+    result: DrawingResult,
+    _officialResultPostedAt: string | null,
+    drawingSize: DrawingSizeSnapshot | null
+  ) {
+    this.saved.push({ snapshot, result, drawingSize });
+    return { snapshot, result, rulesChanged: true, resultChanged: true, drawingSizeUpdated: drawingSize !== null };
   }
 }
 
@@ -79,7 +84,27 @@ test("fetches official documents, validates parsed data, and stores raw and norm
     }
     throw new Error(`Unexpected request: ${url}`);
   };
-  const provider = new HttpOfficialLotteryProvider({ powerball: definition }, fetcher);
+  const httpProvider = new HttpOfficialLotteryProvider({ powerball: definition }, fetcher);
+  const provider = {
+    fetchRules: (lottery: "powerball" | "mega_millions") => httpProvider.fetchRules(lottery),
+    fetchResult: (targetDrawing: Drawing) => httpProvider.fetchResult(targetDrawing),
+    async fetchDrawingSize(targetDrawing: Drawing) {
+      return {
+        document: {
+          url: "https://www.powerball.com/v1/gameapi/next-drawing?gamecode=powerball&language=en",
+          contentType: "text/html",
+          body: "official jackpot response",
+          sha256: "c".repeat(64),
+          fetchedAt: "2026-11-08T03:00:00.000Z",
+        },
+        size: {
+          drawingDate: targetDrawing.drawingDate,
+          estimatedJackpot: 30000000,
+          cashValue: 12900000,
+        },
+      };
+    },
+  };
   const repository = new TestOfficialDataRepository();
   const service = new OfficialLotteryDataService(repository, provider);
 
@@ -99,6 +124,10 @@ test("fetches official documents, validates parsed data, and stores raw and norm
   assert.equal(saved.result.officialSourceUrl, definition.resultsUrl);
   assert.equal(saved.result.officialSourceDocument, JSON.stringify(resultPayload));
   assert.equal(saved.result.sourceSnapshotId, saved.snapshot.id);
+  assert.equal(repository.saved[0].drawingSize?.estimatedJackpot, 30000000);
+  assert.equal(repository.saved[0].drawingSize?.cashValue, 12900000);
+  assert.equal(repository.saved[0].drawingSize?.sourceSha256, "c".repeat(64));
+  assert.equal(saved.drawingSizeUpdated, true);
 });
 
 test("rejects redirects outside the configured official host allowlist", async () => {
