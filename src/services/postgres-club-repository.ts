@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   CalculationSnapshot,
   Club,
@@ -7,8 +9,9 @@ import type {
   DrawingSizeSnapshot,
   DrawingResult,
   LotteryType,
-  PayoutConfiguration,
+  NotificationDraft,
   PrizeAward,
+  PayoutConfiguration,
   ThresholdRule,
 } from "../domain";
 import type { ClubRepository } from "./club-service";
@@ -318,8 +321,8 @@ export class PostgresClubRepository implements ClubRepository {
             SET official_winning_numbers = $2, jackpot_estimate = $3, prize_breakdown = $4,
                 official_source_url = $5, official_source_content_type = $6,
                 official_source_document = $7, official_source_sha256 = $8,
-                status = $9, calculation_started_at = $10, calculated_at = $11,
-                source_snapshot_id = $12
+                official_source_captured_at = $9, status = $10,
+                calculation_started_at = $11, calculated_at = $12, source_snapshot_id = $13
             WHERE id = $1
             RETURNING *
           `,
@@ -332,6 +335,7 @@ export class PostgresClubRepository implements ClubRepository {
             storedResultInput.officialSourceContentType ?? null,
             storedResultInput.officialSourceDocument ?? null,
             storedResultInput.officialSourceSha256 ?? null,
+            storedResultInput.officialSourceCapturedAt ?? null,
             storedResultInput.status,
             storedResultInput.calculationStartedAt,
             storedResultInput.calculatedAt,
@@ -345,9 +349,9 @@ export class PostgresClubRepository implements ClubRepository {
             INSERT INTO drawing_results (
               id, drawing_id, club_id, official_winning_numbers, jackpot_estimate, prize_breakdown,
               official_source_url, official_source_content_type, official_source_document,
-              official_source_sha256, status, calculation_started_at, calculated_at,
+              official_source_sha256, official_source_captured_at, status, calculation_started_at, calculated_at,
               source_snapshot_id, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING *
           `,
           [
@@ -361,6 +365,7 @@ export class PostgresClubRepository implements ClubRepository {
             storedResultInput.officialSourceContentType ?? null,
             storedResultInput.officialSourceDocument ?? null,
             storedResultInput.officialSourceSha256 ?? null,
+            storedResultInput.officialSourceCapturedAt ?? null,
             storedResultInput.status,
             storedResultInput.calculationStartedAt,
             storedResultInput.calculatedAt,
@@ -641,7 +646,8 @@ export class PostgresClubRepository implements ClubRepository {
     resultId: string,
     awards: PrizeAward[],
     status: "calculated" | "recalculated",
-    calculatedAt: string
+    calculatedAt: string,
+    notificationDrafts: NotificationDraft[] = []
   ): Promise<PrizeAward[]> {
     await this.client.query("BEGIN");
     try {
@@ -685,12 +691,65 @@ export class PostgresClubRepository implements ClubRepository {
         `,
         [resultId, status, calculatedAt]
       );
+
+      if (notificationDrafts.length) {
+        const userIds = [...new Set(notificationDrafts.map((notification) => notification.userId))];
+        const { rows: preferenceRows } = await this.client.query(
+          `SELECT u.id AS user_id,
+                  COALESCE(p.in_app_enabled, true) AS in_app_enabled,
+                  COALESCE(p.email_enabled, true) AS email_enabled
+           FROM users u
+           LEFT JOIN notification_preferences p ON p.user_id = u.id
+           WHERE u.id = ANY($1::uuid[])`,
+          [userIds]
+        );
+        const preferences = new Map(preferenceRows.map((row) => [row.user_id, row]));
+        for (const notification of notificationDrafts) {
+          const preference = preferences.get(notification.userId);
+          if (!preference) continue;
+          const channels = [
+            ...(preference.in_app_enabled ? ["in_app" as const] : []),
+            ...(preference.email_enabled ? ["email" as const] : []),
+          ];
+          for (const channel of channels) {
+            const inApp = channel === "in_app";
+            await this.client.query(
+              `INSERT INTO notifications (
+                 id, user_id, club_id, drawing_id, type, channel, status, message,
+                 recalculation_type, sent_at, created_at
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [
+                randomUUID(),
+                notification.userId,
+                notification.clubId,
+                notification.drawingId,
+                notification.type,
+                channel,
+                inApp ? "sent" : "queued",
+                notification.message,
+                notification.recalculationType ?? null,
+                inApp ? calculatedAt : null,
+                calculatedAt,
+              ]
+            );
+          }
+        }
+      }
+
       await this.client.query("COMMIT");
       return savedAwards;
     } catch (error) {
       await this.client.query("ROLLBACK");
       throw error;
     }
+  }
+
+  async findPrizeAwardsForResult(resultId: string): Promise<PrizeAward[]> {
+    const { rows } = await this.client.query(
+      "SELECT * FROM prize_awards WHERE drawing_result_id = $1 ORDER BY created_at, user_id",
+      [resultId]
+    );
+    return rows.map(PostgresClubRepository.toPrizeAward);
   }
 
   private static toClub(row: Record<string, any>): Club {
@@ -811,6 +870,9 @@ export class PostgresClubRepository implements ClubRepository {
       officialSourceContentType: row.official_source_content_type ?? null,
       officialSourceDocument: row.official_source_document ?? null,
       officialSourceSha256: row.official_source_sha256 ?? null,
+      officialSourceCapturedAt: row.official_source_captured_at
+        ? PostgresClubRepository.toIsoString(row.official_source_captured_at)
+        : null,
     };
   }
 

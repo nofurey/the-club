@@ -326,6 +326,7 @@ export class OfficialLotteryDataService {
       officialSourceContentType: fetchedResult.document.contentType,
       officialSourceDocument: fetchedResult.document.body,
       officialSourceSha256: fetchedResult.document.sha256,
+      officialSourceCapturedAt: fetchedResult.document.fetchedAt,
     };
 
     const drawingSize: DrawingSizeSnapshot | null = fetchedDrawingSize

@@ -136,6 +136,37 @@ test("normalizes Mega Millions bonus number and returns pending draws as no resu
   assert.equal(result.result, null);
 });
 
+test("fails on missing or invalid Michigan GraphQL result fields", async () => {
+  const missingNumbers = new MichiganLotteryGraphqlProvider(async () => jsonResponse({
+    data: { winningNumbers: null, payout: { payoutGeneric: [] } },
+  }));
+  await assert.rejects(() => missingNumbers.fetchResult(drawing), /missing the winning numbers object/i);
+
+  const invalidBonus = new MichiganLotteryGraphqlProvider(async () => jsonResponse({
+    data: {
+      winningNumbers: {
+        resultsPending: false,
+        drawNumbers: [3, 36, 37, 56, 61],
+        powerball: 99,
+      },
+      payout: { payoutGeneric: [] },
+    },
+  }));
+  await assert.rejects(() => invalidBonus.fetchResult(drawing), /invalid bonus winning number/i);
+});
+
+test("treats an all-null result as pending only for today's or future drawings", async () => {
+  const provider = new MichiganLotteryGraphqlProvider(async () => jsonResponse({
+    data: {
+      winningNumbers: { resultsPending: false, drawNumbers: null, powerball: null, megaball: null },
+      payout: { resultsPending: false, payoutGeneric: [] },
+    },
+  }), { now: () => new Date("2026-11-13T12:00:00.000Z") });
+
+  assert.equal((await provider.fetchResult({ ...drawing, drawingDate: "2026-11-14" })).result, null);
+  await assert.rejects(() => provider.fetchResult({ ...drawing, drawingDate: "2026-11-07" }), /invalid main winning numbers/i);
+});
+
 test("reads ticket cost wrapped in Michigan Lottery Markdown formatting", async () => {
   const fetcher: typeof fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));

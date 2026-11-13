@@ -92,6 +92,9 @@ export interface NumberSet {
   contributionId: string;
   numbers: number[];
   bonusNumber?: string | null;
+  powerPlay?: boolean;
+  doublePlay?: boolean;
+  megaplier?: number;
   createdAt: string;
 }
 
@@ -173,6 +176,7 @@ export interface DrawingResult {
   officialSourceContentType?: string | null;
   officialSourceDocument?: string | null;
   officialSourceSha256?: string | null;
+  officialSourceCapturedAt?: string | null;
 }
 
 export interface PrizeAward {
@@ -225,7 +229,17 @@ export interface Notification {
   message: string;
   recalculationType?: string | null;
   sentAt?: string | null;
+  readAt?: string | null;
   createdAt: string;
+}
+
+export interface NotificationDraft {
+  userId: string;
+  clubId: string;
+  drawingId: string;
+  type: string;
+  message: string;
+  recalculationType?: string | null;
 }
 
 export interface Flag {

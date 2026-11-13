@@ -8,6 +8,7 @@ import type {
   Contribution,
   Drawing,
   DrawingResult,
+  NotificationDraft,
   PayoutConfiguration,
   PrizeAward,
   ThresholdRule,
@@ -52,7 +53,7 @@ const result: DrawingResult = {
   clubId: club.id,
   officialWinningNumbers: { numbers: [1, 2, 3, 4, 5], bonusNumber: "6" },
   jackpotEstimate: 1000000,
-  prizeBreakdown: {},
+  prizeBreakdown: { jackpot_winners: 1 },
   status: "results_posted",
   calculationStartedAt: null,
   calculatedAt: null,
@@ -142,12 +143,15 @@ const contributions: Contribution[] = [
 
 class TestCalculationRepository implements DrawingCalculationRepository {
   savedAwards: PrizeAward[] = [];
+  existingAwards: PrizeAward[] = [];
+  savedNotifications: NotificationDraft[] = [];
   savedStatus: DrawingResult["status"] | null = null;
 
   async findClubById(clubId: string) { return clubId === club.id ? club : null; }
   async findDrawingById(drawingId: string) { return drawingId === drawing.id ? drawing : null; }
   async findDrawingsByLottery() { return [drawing]; }
   async findDrawingResultByDrawingAndClub() { return result; }
+  async findPrizeAwardsForResult() { return this.existingAwards; }
   async findCalculationSnapshotById(snapshotId: string) { return snapshotId === snapshot.id ? snapshot : null; }
   async findMembershipsByClub() { return memberships; }
   async findContributionsForClub() { return contributions; }
@@ -160,9 +164,13 @@ class TestCalculationRepository implements DrawingCalculationRepository {
   async replacePrizeAwardsAndCompleteResult(
     _resultId: string,
     awards: PrizeAward[],
-    status: DrawingResult["status"]
+    status: "calculated" | "recalculated",
+    _calculatedAt: string,
+    notifications: NotificationDraft[] = []
   ) {
     this.savedAwards = awards;
+    this.existingAwards = awards;
+    this.savedNotifications = notifications;
     this.savedStatus = status;
     return awards;
   }
@@ -190,4 +198,38 @@ test("calculates a posted drawing and persists eligible member awards", async ()
   );
   assert.equal(repository.savedStatus, "calculated");
   assert.equal(repository.savedAwards.length, 1);
+  assert.deepEqual(repository.savedNotifications.map(({ userId, type }) => ({ userId, type })), [{ userId: "u1", type: "payout_calculated" }]);
+});
+
+test("notifies the prior winner when recalculation removes an award", async () => {
+  const repository = new TestCalculationRepository();
+  repository.existingAwards = [{
+    id: "old-award",
+    drawingResultId: result.id,
+    contributionId: null,
+    userId: "u1",
+    clubId: club.id,
+    prizeType: "drawing_payout",
+    grossPrizeAmount: 100,
+    shareAmount: 100,
+    thresholdMet: true,
+    payoutType: "equal_shares",
+    status: "allocated",
+    createdAt: result.createdAt,
+    updatedAt: result.createdAt,
+  }];
+  const service = new DrawingCalculationService(repository, {
+    async evaluate() { return { drawingContributionIds: [], wins: [] }; },
+  });
+
+  await service.calculateDrawing({
+    drawingId: drawing.id,
+    clubId: club.id,
+    cutoffAt: "2025-01-05T21:58:00-05:00",
+    recalculation: true,
+  });
+
+  assert.deepEqual(repository.savedNotifications.map(({ userId, recalculationType }) => ({ userId, recalculationType })), [
+    { userId: "u1", recalculationType: "win_removed" },
+  ]);
 });

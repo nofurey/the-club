@@ -1,7 +1,8 @@
 import type { ClubMembership, Contribution, Drawing, DrawingResult, NumberSet } from "../../../src/domain";
 import type { CreateClubRequest } from "../../../src/api/contracts";
 import { getDrawingCountOptions } from "../../../src/services/drawing-schedule";
-import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView } from "./contracts";
+import { contributionCost, storedPlayOptions } from "../../../src/services/ticket-options";
+import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView, Notification, NotificationPreference, UpdateNotificationPreferencesRequest } from "./contracts";
 
 const now = "2026-11-09T12:00:00.000Z";
 const clubId = "a1000000-0000-4000-8000-000000000001";
@@ -40,6 +41,7 @@ function makeContribution({
   drawingCount,
   numbers,
   bonusNumber,
+  megaplier,
   costUsd,
 }: {
   id: string;
@@ -49,6 +51,7 @@ function makeContribution({
   drawingCount: number;
   numbers: number[];
   bonusNumber: number;
+  megaplier?: number;
   costUsd: number;
 }): Contribution {
   const numberSet: NumberSet = {
@@ -56,6 +59,7 @@ function makeContribution({
     contributionId: id,
     numbers,
     bonusNumber: String(bonusNumber),
+    ...(megaplier ? { megaplier } : {}),
     createdAt: now,
   };
   return {
@@ -77,9 +81,9 @@ function makeContribution({
 
 const contributions: Contribution[] = [
   makeContribution({ id: "a2000000-0000-4000-8000-000000000001", userId: ownerId, lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 2, numbers: [7, 14, 21, 28, 35], bonusNumber: 9, costUsd: 4 }),
-  makeContribution({ id: "a2000000-0000-4000-8000-000000000002", userId: users[1].id, lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 1, numbers: [8, 19, 30, 41, 52], bonusNumber: 6, costUsd: 5 }),
+  makeContribution({ id: "a2000000-0000-4000-8000-000000000002", userId: users[1].id, lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 1, numbers: [8, 19, 30, 41, 52], bonusNumber: 6, megaplier: 3, costUsd: 5 }),
   makeContribution({ id: "a2000000-0000-4000-8000-000000000003", userId: users[2].id, lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 1, numbers: [3, 16, 24, 47, 62], bonusNumber: 18, costUsd: 2 }),
-  makeContribution({ id: "a2000000-0000-4000-8000-000000000004", userId: users[3].id, lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 2, numbers: [11, 23, 36, 48, 65], bonusNumber: 3, costUsd: 10 }),
+  makeContribution({ id: "a2000000-0000-4000-8000-000000000004", userId: users[3].id, lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 2, numbers: [11, 23, 36, 48, 65], bonusNumber: 3, megaplier: 2, costUsd: 10 }),
   makeContribution({ id: "a2000000-0000-4000-8000-000000000005", userId: users[4].id, lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 1, numbers: [5, 18, 33, 54, 68], bonusNumber: 11, costUsd: 2 }),
 ];
 
@@ -153,6 +157,14 @@ export const demoClubApi: ClubApi = {
   async signOut() {},
   async closeAccount() { throw new Error("Account management requires an authenticated session."); },
   async getCurrentUser() { return (await this.getOverview()).currentUser; },
+  async getNotifications(): Promise<Notification[]> { return []; },
+  async getNotificationPreferences(): Promise<NotificationPreference> {
+    return { id: "a9000000-0000-4000-8000-000000000001", userId: ownerId, inAppEnabled: true, emailEnabled: true, pushEnabled: false, smsEnabled: false, phoneVerified: false, updatedAt: now };
+  },
+  async updateNotificationPreferences(input: UpdateNotificationPreferencesRequest): Promise<NotificationPreference> {
+    return { ...(await this.getNotificationPreferences()), ...input };
+  },
+  async markNotificationRead() {},
   async getOverview() {
     const totalContributionsUsd = liveContributions.reduce((sum, contribution) => sum + contribution.costUsd, 0);
     const totalGrossPrizesUsd = results.reduce((sum, item) => sum + item.grossPrizeTotal, 0);
@@ -233,9 +245,9 @@ export const demoClubApi: ClubApi = {
       drawingCount: input.drawingCount,
       numbers: plays[0].numbers,
       bonusNumber: plays[0].bonusNumber,
-      costUsd: baseCost * input.drawingCount * plays.length,
+      costUsd: contributionCost(input.lottery, baseCost, input.drawingCount, plays),
     });
-    contribution.numberSets = plays.map((play) => ({ id: crypto.randomUUID(), contributionId: id, numbers: play.numbers, bonusNumber: String(play.bonusNumber), createdAt: now }));
+    contribution.numberSets = plays.map((play) => ({ id: crypto.randomUUID(), contributionId: id, numbers: play.numbers, bonusNumber: String(play.bonusNumber), ...storedPlayOptions(play), createdAt: now }));
     if (photo) {
       contributionPhotos.set(id, photo);
       contribution.hasTicketPhoto = true;
@@ -253,8 +265,8 @@ export const demoClubApi: ClubApi = {
       lottery: input.lottery,
       drawingDate: input.drawingDate,
       drawingCount: input.drawingCount,
-      numberSets: plays.map((play) => ({ id: crypto.randomUUID(), contributionId, numbers: play.numbers, bonusNumber: String(play.bonusNumber), createdAt: now })),
-      costUsd: (input.lottery === "powerball" ? 2 : 5) * input.drawingCount * plays.length,
+      numberSets: plays.map((play) => ({ id: crypto.randomUUID(), contributionId, numbers: play.numbers, bonusNumber: String(play.bonusNumber), ...storedPlayOptions(play), createdAt: now })),
+      costUsd: contributionCost(input.lottery, input.lottery === "powerball" ? 2 : 5, input.drawingCount, plays),
       updatedAt: new Date().toISOString(),
       version: existing.version + 1,
     };

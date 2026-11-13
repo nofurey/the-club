@@ -7,6 +7,8 @@ import type {
   LotteryType,
   MembershipRole,
   MembershipStatus,
+  Notification,
+  NotificationPreference,
   PayoutType,
   PrizeAwardStatus,
   PayoutConfiguration,
@@ -56,6 +58,9 @@ export interface ClubOverview {
 export interface TicketNumberSetInput {
   numbers: number[];
   bonusNumber: number;
+  powerPlay?: boolean;
+  doublePlay?: boolean;
+  megaplier?: number;
 }
 
 export type CreateContributionInput = {
@@ -67,6 +72,7 @@ export type CreateContributionInput = {
 export interface TicketDrawingOption {
   lottery: LotteryType;
   drawingDate: string;
+  existingTicketDate?: boolean;
   maxDrawingCount: number;
   drawingCountOptions: number[];
   maxNumberSets: number;
@@ -134,6 +140,8 @@ export interface MembershipActionResult {
   role: MembershipRole;
   status: MembershipStatus;
 }
+
+export type UpdateNotificationPreferencesRequest = Pick<NotificationPreference, "inAppEnabled" | "emailEnabled">;
 
 export interface UpdateClubSettingsRequest {
   name: string;

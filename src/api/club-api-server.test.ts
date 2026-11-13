@@ -66,6 +66,14 @@ function createRepository(): ClubApiRepository & { createdBy: string | null; upd
       assert.equal(identity.emailVerified, true);
       return user;
     },
+    async listNotifications() { return []; },
+    async getNotificationPreferences() {
+      return { id: "b8000000-0000-4000-8000-000000000001", userId: user.id, inAppEnabled: true, emailEnabled: true, pushEnabled: false, smsEnabled: false, phoneVerified: false, updatedAt: "2026-01-01T00:00:00.000Z" };
+    },
+    async updateNotificationPreferences(userId, input) {
+      return { id: "b8000000-0000-4000-8000-000000000001", userId, ...input, pushEnabled: false, smsEnabled: false, phoneVerified: false, updatedAt: "2026-01-01T00:00:00.000Z" };
+    },
+    async markNotificationRead() { return true; },
     async listUserClubs(userId) {
       return userId === user.id ? [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" }] : [];
     },
@@ -187,6 +195,40 @@ test("lists the authenticated member's clubs and updates settings through the AP
   assert.equal(updated.json().club.visibility, "public");
   repository.updateClubSettings = async () => null;
   assert.equal((await server.inject({ method: "PATCH", url, headers: { authorization: "Bearer valid-token" }, payload })).statusCode, 404);
+});
+
+test("notification inbox and preference actions use the authenticated user", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+  let updatedBy: string | null = null;
+  let markedReadBy: string | null = null;
+  repository.updateNotificationPreferences = async (userId, input) => {
+    updatedBy = userId;
+    return { id: "b8000000-0000-4000-8000-000000000001", userId, ...input, pushEnabled: false, smsEnabled: false, phoneVerified: false, updatedAt: "2026-01-01T00:00:00.000Z" };
+  };
+  repository.markNotificationRead = async (userId) => {
+    markedReadBy = userId;
+    return true;
+  };
+
+  assert.equal((await server.inject({ method: "GET", url: "/api/v1/me/notifications" })).statusCode, 401);
+  const headers = { authorization: "Bearer valid-token" };
+  assert.equal((await server.inject({ method: "GET", url: "/api/v1/me/notifications", headers })).statusCode, 200);
+  const preferences = await server.inject({
+    method: "PATCH",
+    url: "/api/v1/me/notification-preferences",
+    headers,
+    payload: { inAppEnabled: false, emailEnabled: true },
+  });
+  assert.equal(preferences.statusCode, 200);
+  assert.equal(updatedBy, user.id);
+  const read = await server.inject({
+    method: "POST",
+    url: "/api/v1/me/notifications/b8000000-0000-4000-8000-000000000002/read",
+    headers,
+  });
+  assert.equal(read.statusCode, 204);
+  assert.equal(markedReadBy, user.id);
 });
 
 test("account closure requires authentication and uses the verified actor", async (t) => {
@@ -414,11 +456,11 @@ test("validates contribution input and associates creation with the authenticate
   });
   const validMegaCount = await server.inject({
     method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
-    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 26, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 26, numberSets: [{ numbers: [1, 2, 3, 4, 5], bonusNumber: 6, megaplier: 3 }] },
   });
   const invalidMegaCount = await server.inject({
     method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
-    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 27, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 27, numberSets: [{ numbers: [1, 2, 3, 4, 5], bonusNumber: 6, megaplier: 3 }] },
   });
   const tooManyPanels = await server.inject({
     method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
@@ -466,6 +508,23 @@ test("accepts multiple plays and rejects an invalid play", async (t) => {
   assert.equal((await server.inject({ method: "POST", url, headers, payload })).statusCode, 400);
   payload.numberSets = Array.from({ length: 11 }, (_, index) => ({ numbers: [1, 2, 3, 4, index + 5], bonusNumber: 6 }));
   assert.equal((await server.inject({ method: "POST", url, headers, payload })).statusCode, 400);
+});
+
+test("accepts Powerball add-ons and requires a valid Mega Millions multiplier", async (t) => {
+  const { server } = await createServer();
+  t.after(() => server.close());
+  const url = `/api/v1/clubs/${contribution.clubId}/contributions`;
+  const headers = { authorization: "Bearer valid-token" };
+  const play = { numbers: [1, 2, 3, 4, 5], bonusNumber: 6 };
+  const post = (lottery: string, drawingDate: string, extra: Record<string, unknown>) =>
+    server.inject({ method: "POST", url, headers, payload: { lottery, drawingDate, drawingCount: 1, numberSets: [{ ...play, ...extra }] } });
+
+  assert.equal((await post("powerball", "2026-11-09", { powerPlay: true, doublePlay: true })).statusCode, 201);
+  assert.equal((await post("powerball", "2026-11-09", { megaplier: 3 })).statusCode, 400);
+  assert.equal((await post("mega_millions", "2026-11-10", { megaplier: 10 })).statusCode, 201);
+  assert.equal((await post("mega_millions", "2026-11-10", {})).statusCode, 400);
+  assert.equal((await post("mega_millions", "2026-11-10", { megaplier: 6 })).statusCode, 400);
+  assert.equal((await post("mega_millions", "2026-11-10", { megaplier: 2, powerPlay: true })).statusCode, 400);
 });
 
 test("accepts a ticket photo with a contribution and protects photo retrieval", async (t) => {

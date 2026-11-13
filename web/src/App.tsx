@@ -34,8 +34,11 @@ import { emptyOcrModel, findPhotoExample, hasLearnableOcrRows, learnOcrCorrectio
 import { clearOcrModel, loadOcrModel, saveOcrModel } from "../../src/services/ticket-ocr-learning-store";
 import { createClubApi } from "./api/club-api";
 import { demoClubApi } from "./api/demo-club-api";
-import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateClubRequest, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./api/contracts";
+import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateClubRequest, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView, Notification, NotificationPreference, TicketDrawingOption, UpdateClubSettingsRequest, UpdateNotificationPreferencesRequest, UserClubSummary } from "./api/contracts";
 import type { TicketNumberSetInput } from "../../src/api/contracts";
+import { contributionCost, hasValidPlayOptions, MEGAPLIER_VALUES, POWERBALL_ADD_ON_PRICE } from "../../src/services/ticket-options";
+
+interface PlayDraft { id: string; numbersText: string; bonusText: string; powerPlay?: boolean; doublePlay?: boolean; megaplier?: string }
 
 type View = "overview" | "contributions" | "results" | "members" | "discovery";
 
@@ -97,6 +100,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountClosed, setAccountClosed] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -387,7 +391,7 @@ function App() {
           <div className="topbar-actions">
             <span className="topbar-date"><CalendarDays size={15} />Monday, November 9</span>
             <button className="icon-button topbar-search" aria-label="Search" onClick={() => setNotice("Search will be connected to the API in a later step.")}><Search size={17} /></button>
-            <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setNotice("You're all caught up.")}><Bell size={17} /><span className="notification-dot" /></button>
+            <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setNotificationsOpen(true)}><Bell size={17} /></button>
             <span className="topbar-avatar">{userInitials(overview.currentUser.displayName)}</span>
           </div>
         </header>
@@ -428,6 +432,7 @@ function App() {
         onCloseClub={async () => { await performMembershipAction(() => api.closeClub(), "Club closed."); setSettingsOpen(false); }}
       />}
       {accountOpen && <AccountDialog user={overview.currentUser} onClose={() => setAccountOpen(false)} onSignOut={signOut} onCloseAccount={closeAccount} />}
+      {notificationsOpen && <NotificationInboxDialog api={api} onClose={() => setNotificationsOpen(false)} />}
       {dialogOpen && <ContributionDialog key={editingContribution?.id ?? "new-contribution"} api={api} userId={overview.currentUser.id} editingContribution={editingContribution ?? undefined} onClose={() => { setDialogOpen(false); setEditingContribution(null); }} onSubmit={saveContribution} onLearningFeedback={setNotice} />}
     </div>
   );
@@ -568,8 +573,8 @@ function ContributionsView({ api, currentUserId, contributions, members, onAdd, 
       <div className="table-wrap"><table><thead><tr><th>Ticket / lottery</th><th>Member</th><th>Draw date</th><th>Selections</th><th>Draws</th><th>Cost</th><th>Status</th></tr></thead>
         <tbody>{visible.map((item) => {
           const member = members.find((candidate) => candidate.userId === item.userId);
-          const sets = item.numberSets as { numbers?: number[]; bonusNumber?: string | number }[];
-          return <tr key={item.id}><td><LotteryBadge lottery={item.lottery} compact /></td><td>{member?.displayName ?? "Member"}</td><td>{formatDate(item.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</td><td><span className="ticket-number-sets">{sets.map((set, index) => <NumberSet key={index} numbers={set.numbers ?? []} bonus={set.bonusNumber} lottery={item.lottery} />)}</span></td><td>{item.drawingCount}</td><td className="money-cell">{money(item.costUsd)}</td><td><span className="ticket-status">{item.userId === currentUserId && item.canEdit && <button className="icon-button ticket-photo-button" type="button" title="Edit ticket" aria-label={`Edit ticket for ${member?.displayName ?? "member"}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>}<StatusTag label="Submitted" tone="neutral" />{item.hasTicketPhoto && <button className="icon-button ticket-photo-button" type="button" title="View ticket photo" aria-label={`View ticket photo for ${member?.displayName ?? "member"}`} onClick={() => setPhotoId(item.id)}><ImageIcon size={16} /></button>}</span></td></tr>;
+          const sets = item.numberSets as { numbers?: number[]; bonusNumber?: string | number; powerPlay?: boolean; doublePlay?: boolean; megaplier?: number }[];
+          return <tr key={item.id}><td><LotteryBadge lottery={item.lottery} compact /></td><td>{member?.displayName ?? "Member"}</td><td>{formatDate(item.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</td><td><span className="ticket-number-sets">{sets.map((set, index) => <NumberSet key={index} numbers={set.numbers ?? []} bonus={set.bonusNumber} lottery={item.lottery} addOns={set} />)}</span></td><td>{item.drawingCount}</td><td className="money-cell">{money(item.costUsd)}</td><td><span className="ticket-status">{item.userId === currentUserId && item.canEdit && <button className="icon-button ticket-photo-button" type="button" title="Edit ticket" aria-label={`Edit ticket for ${member?.displayName ?? "member"}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>}<StatusTag label="Submitted" tone="neutral" />{item.hasTicketPhoto && <button className="icon-button ticket-photo-button" type="button" title="View ticket photo" aria-label={`View ticket photo for ${member?.displayName ?? "member"}`} onClick={() => setPhotoId(item.id)}><ImageIcon size={16} /></button>}</span></td></tr>;
         })}</tbody></table>
       </div>
       <div className="table-footnote"><Eye size={14} />Ticket records are visible to club members. The app does not verify physical tickets.</div>
@@ -780,8 +785,9 @@ function LotteryBadge({ lottery, compact = false }: { lottery: LotteryType; comp
   return <span className={`lottery-badge ${lottery === "powerball" ? "badge-powerball" : "badge-mega"} ${compact ? "lottery-badge-compact" : ""}`}><span className="lottery-ball">{lottery === "powerball" ? "P" : "M"}</span>{compact ? <span className="sr-only">{lotteryName(lottery)}</span> : lotteryName(lottery)}</span>;
 }
 
-function NumberSet({ numbers, bonus, lottery }: { numbers: number[]; bonus?: string | number | null; lottery: LotteryType }) {
-  return <span className="number-set">{numbers.map((number, index) => <span className="number-ball" key={`${number}-${index}`}>{number}</span>)}{bonus != null && bonus !== "" && <span className={`number-ball number-bonus ${lottery === "mega_millions" ? "number-mega" : ""}`}>{bonus}</span>}</span>;
+function NumberSet({ numbers, bonus, lottery, addOns }: { numbers: number[]; bonus?: string | number | null; lottery: LotteryType; addOns?: { powerPlay?: boolean; doublePlay?: boolean; megaplier?: number } }) {
+  const labels = [addOns?.powerPlay && "Power Play", addOns?.doublePlay && "Double Play", addOns?.megaplier && `${addOns.megaplier}X`].filter(Boolean).join(" · ");
+  return <span className="number-set">{numbers.map((number, index) => <span className="number-ball" key={`${number}-${index}`}>{number}</span>)}{bonus != null && bonus !== "" && <span className={`number-ball number-bonus ${lottery === "mega_millions" ? "number-mega" : ""}`}>{bonus}</span>}{labels && <small className="play-addon-tag">{labels}</small>}</span>;
 }
 
 function StatusTag({ label, tone }: { label: string; tone: "success" | "warning" | "neutral" | "mint" }) {
@@ -893,6 +899,78 @@ function AccountDialog({ user, onClose, onSignOut, onCloseAccount }: { user: Use
   </div>;
 }
 
+function NotificationInboxDialog({ api, onClose }: { api: ClubApi; onClose: () => void }) {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [preferences, setPreferences] = useState<NotificationPreference | null>(null);
+  const [inAppEnabled, setInAppEnabled] = useState(true);
+  const [emailEnabled, setEmailEnabled] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    Promise.all([api.getNotifications(), api.getNotificationPreferences()])
+      .then(([items, savedPreferences]) => {
+        if (!mounted) return;
+        setNotifications(items);
+        setPreferences(savedPreferences);
+        setInAppEnabled(savedPreferences.inAppEnabled);
+        setEmailEnabled(savedPreferences.emailEnabled);
+      })
+      .catch((cause: unknown) => {
+        if (mounted) setError(cause instanceof Error ? cause.message : "Notifications could not be loaded.");
+      })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [api]);
+
+  const savePreferences = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await api.updateNotificationPreferences({ inAppEnabled, emailEnabled });
+      setPreferences(saved);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Notification preferences could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const markRead = async (notificationId: string) => {
+    setError(null);
+    try {
+      await api.markNotificationRead(notificationId);
+      const readAt = new Date().toISOString();
+      setNotifications((items) => items.map((item) => item.id === notificationId ? { ...item, readAt } : item));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Notification could not be marked read.");
+    }
+  };
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <section className="contribution-dialog notifications-dialog" role="dialog" aria-modal="true" aria-labelledby="notifications-title">
+      <div className="dialog-head"><div><span className="section-kicker">ACTIVITY</span><h2 id="notifications-title">Notifications</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close notifications"><X size={18} /></button></div>
+      <form className="notification-preferences" onSubmit={savePreferences}>
+        <label><input type="checkbox" checked={inAppEnabled} onChange={(event) => setInAppEnabled(event.target.checked)} />In-app</label>
+        <label><input type="checkbox" checked={emailEnabled} onChange={(event) => setEmailEnabled(event.target.checked)} />Email</label>
+        <button className="button button-secondary" type="submit" disabled={saving || !preferences}>{saving ? "Saving..." : "Save preferences"}</button>
+      </form>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {loading ? <p className="notification-empty">Loading notifications...</p> : notifications.length === 0
+        ? <p className="notification-empty">No notifications yet.</p>
+        : <div className="notification-list">
+          {notifications.map((item) => <article className={`notification-row ${item.readAt ? "notification-row-read" : ""}`} key={item.id}>
+            <div className="notification-copy"><span className="notification-kind">{item.recalculationType === "win_removed" ? "Win removed" : item.recalculationType === "win_added" ? "Win added" : item.recalculationType === "win_updated" ? "Payout updated" : "Payout calculated"}</span><p>{item.message}</p><time dateTime={item.createdAt}>{new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.createdAt))}</time></div>
+            {!item.readAt && <button className="icon-button notification-read-button" type="button" aria-label="Mark as read" title="Mark as read" onClick={() => void markRead(item.id)}><Check size={16} /></button>}
+          </article>)}
+        </div>}
+    </section>
+  </div>;
+}
+
 function CreateClubDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: CreateClubRequest) => Promise<void> }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -955,10 +1033,10 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
   const [lottery, setLottery] = useState<LotteryType>(editingContribution?.lottery ?? "powerball");
   const [drawingDate, setDrawingDate] = useState(editingContribution?.drawingDate ?? "");
   const [drawingCount, setDrawingCount] = useState(editingContribution?.drawingCount ?? 1);
-  const [plays, setPlays] = useState(() => {
-    const savedSets = editingContribution?.numberSets as { numbers?: number[]; bonusNumber?: string | number }[] | undefined;
+  const [plays, setPlays] = useState<PlayDraft[]>(() => {
+    const savedSets = editingContribution?.numberSets as { numbers?: number[]; bonusNumber?: string | number; powerPlay?: boolean; doublePlay?: boolean; megaplier?: number }[] | undefined;
     return savedSets?.length
-      ? savedSets.map((set) => ({ id: crypto.randomUUID(), numbersText: (set.numbers ?? []).join(", "), bonusText: String(set.bonusNumber ?? "") }))
+      ? savedSets.map((set) => ({ id: crypto.randomUUID(), numbersText: (set.numbers ?? []).join(", "), bonusText: String(set.bonusNumber ?? ""), powerPlay: set.powerPlay === true, doublePlay: set.doublePlay === true, megaplier: set.megaplier ? String(set.megaplier) : "" }))
       : [{ id: crypto.randomUUID(), numbersText: "", bonusText: "" }];
   });
   const [options, setOptions] = useState<TicketDrawingOption[]>([]);
@@ -985,6 +1063,7 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
   const photoInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(false);
   const selected = options.find((option) => option.lottery === lottery && option.drawingDate === drawingDate);
+  const currentEasternDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const rules = selected?.numberRules;
   const lotteries = [...new Set(options.map((option) => option.lottery))];
   const canLearn = ocrText !== null && hasLearnableOcrRows(ocrText);
@@ -1051,6 +1130,11 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
     }
   };
 
+  const updatePlay = (playId: string, patch: Partial<PlayDraft>) => {
+    setPlays((current) => current.map((item) => item.id === playId ? { ...item, ...patch } : item));
+    setLearningConsent(false);
+  };
+
   const chooseNumber = (playId: string, slot: number, value: number) => {
     if (!rules) return;
     const play = plays.find((item) => item.id === playId);
@@ -1102,7 +1186,13 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const numberSets = plays.map((play) => ({ numbers: play.numbersText.split(",").map((value) => Number(value.trim())), bonusNumber: Number(play.bonusText) }));
+    const numberSets: TicketNumberSetInput[] = plays.map((play) => ({
+      numbers: play.numbersText.split(",").map((value) => Number(value.trim())),
+      bonusNumber: Number(play.bonusText),
+      ...(lottery === "powerball"
+        ? { ...(play.powerPlay ? { powerPlay: true } : {}), ...(play.doublePlay ? { doublePlay: true } : {}) }
+        : { megaplier: Number(play.megaplier) }),
+    }));
     if (!selected || !rules || selected.ticketPrice === null) {
       setError("Official ticket rules and pricing are not available for this drawing.");
       return;
@@ -1118,6 +1208,10 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
       }
       if (!Number.isInteger(play.bonusNumber) || play.bonusNumber < rules.bonusNumberMin || play.bonusNumber > rules.bonusNumberMax) {
         setError(`Play ${index + 1}: enter a ${bonusName(lottery)} number from ${rules.bonusNumberMin} to ${rules.bonusNumberMax}.`);
+        return;
+      }
+      if (!hasValidPlayOptions(lottery, play)) {
+        setError(`Play ${index + 1}: choose the multiplier printed on the ticket.`);
         return;
       }
     }
@@ -1161,7 +1255,7 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
           {lotteries.map((option) => <button type="button" disabled={reading || Boolean(editingContribution)} className={`lottery-option ${lottery === option ? "lottery-option-selected" : ""}`} onClick={() => handleLotteryChange(option)} key={option}><LotteryBadge lottery={option} />{lottery === option && <Check size={16} />}</button>)}
         </div>
         <div className="field-grid">
-          <label className="field-label">Drawing date<select value={drawingDate} onChange={(event) => { setDrawingDate(event.target.value); setDrawingCount(1); setActiveNumber(null); setOcrResult(null); setOcrText(null); setLearningConsent(false); setError(null); }} required disabled={loadingOptions || reading}><option value="">Select a drawing</option>{options.filter((option) => option.lottery === lottery).map((option) => <option value={option.drawingDate} key={option.drawingDate}>{formatDate(option.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</option>)}</select></label>
+          <label className="field-label">Drawing date<select value={drawingDate} onChange={(event) => { setDrawingDate(event.target.value); setDrawingCount(1); setActiveNumber(null); setOcrResult(null); setOcrText(null); setLearningConsent(false); setError(null); }} required disabled={loadingOptions || reading}><option value="">Select a drawing</option>{options.filter((option) => option.lottery === lottery && (option.drawingDate >= currentEasternDate || (editingContribution && option.existingTicketDate))).map((option) => <option value={option.drawingDate} key={option.drawingDate}>{formatDate(option.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</option>)}</select></label>
           <label className="field-label">Number of drawings<select value={drawingCount} onChange={(event) => setDrawingCount(Number(event.target.value))} disabled={!selected}>{(selected?.drawingCountOptions ?? [1]).map((count) => <option value={count} key={count}>{count} {count === 1 ? "drawing" : "drawings"}</option>)}</select></label>
         </div>
         {plays.map((play, index) => {
@@ -1187,6 +1281,10 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
                 return <button className={`number-picker-option ${selectedValue === value ? "number-picker-selected" : ""}`} type="button" key={value} disabled={used} aria-label={`Select ${bonusActive ? bonusName(lottery) : "main number"} ${value}`} aria-pressed={selectedValue === value} onClick={() => chooseNumber(play.id, activeSlot, value)}>{String(value).padStart(2, "0")}</button>;
               })}</div>
             </div>}
+            {lottery === "powerball" ? <div className="play-addons" role="group" aria-label={`Play ${index + 1} add-ons`}>
+              <label><input type="checkbox" checked={Boolean(play.powerPlay)} onChange={(event) => updatePlay(play.id, { powerPlay: event.target.checked })} />Power Play (+{ticketMoney(POWERBALL_ADD_ON_PRICE)})</label>
+              <label><input type="checkbox" checked={Boolean(play.doublePlay)} onChange={(event) => updatePlay(play.id, { doublePlay: event.target.checked })} />Double Play (+{ticketMoney(POWERBALL_ADD_ON_PRICE)})</label>
+            </div> : <label className="field-label play-addons">Multiplier on ticket<select value={play.megaplier ?? ""} onChange={(event) => updatePlay(play.id, { megaplier: event.target.value })} aria-label={`Play ${index + 1} multiplier`}><option value="">Choose multiplier</option>{MEGAPLIER_VALUES.map((value) => <option value={value} key={value}>{value}X</option>)}</select></label>}
           </div>;
         })}
         <button className="button button-secondary add-play-button" type="button" disabled={plays.length >= (selected?.maxNumberSets ?? 10)} onClick={() => { setPlays((current) => [...current, { id: crypto.randomUUID(), numbersText: "", bonusText: "" }]); setOcrConfirmed(false); setLearningConsent(false); }}><Plus size={15} />Add play</button>
@@ -1217,7 +1315,7 @@ function ContributionDialog({ api, userId, editingContribution, onClose, onSubmi
         {learningCount > 0 && <button className="text-button clear-learning-button" type="button" onClick={() => { const storage = readerStorage(); if (storage && clearOcrModel(storage, userId)) { setLearningCount(0); setOcrResult(null); setOcrText(null); setLearningConsent(false); setError(null); } else setError("Reader learning could not be cleared on this browser."); }}>Clear local reader learning</button>}
         </>}
         {editingContribution?.hasTicketPhoto && <p className="photo-help">The existing ticket photo will stay attached to this contribution.</p>}
-        <div className="cost-preview"><span>Recorded ticket cost</span><strong>{selected?.ticketPrice != null ? ticketMoney(selected.ticketPrice * drawingCount * plays.length) : "Unavailable"}</strong><small>{loadingOptions ? "Loading drawings..." : !options.length ? "No drawings are available." : selected?.ticketPrice != null && rules ? "Based on saved official rules." : "Official rules and pricing are not available for this drawing."}</small></div>
+        <div className="cost-preview"><span>Recorded ticket cost</span><strong>{selected?.ticketPrice != null ? ticketMoney(contributionCost(lottery, selected.ticketPrice, drawingCount, plays.map((play) => ({ powerPlay: play.powerPlay, doublePlay: play.doublePlay })))) : "Unavailable"}</strong><small>{loadingOptions ? "Loading drawings..." : !options.length ? "No drawings are available." : selected?.ticketPrice != null && rules ? "Based on saved official rules." : "Official rules and pricing are not available for this drawing."}</small></div>
         {needsPricingRefresh && <button className="button button-secondary refresh-price-button" type="button" disabled={refreshingPricing || loadingOptions} onClick={refreshPricing}>{refreshingPricing ? "Refreshing price..." : "Refresh official price"}</button>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || reading || (ocrApplied && !ocrConfirmed) || !selected || selected.ticketPrice === null || !rules}>{saving ? "Saving..." : editingContribution ? "Save changes" : <><Plus size={16} />Add ticket</>}</button></div>

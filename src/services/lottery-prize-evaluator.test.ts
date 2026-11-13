@@ -50,7 +50,7 @@ const result: DrawingResult = {
   clubId: "club-1",
   officialWinningNumbers: { numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
   jackpotEstimate: 25000000,
-  prizeBreakdown: {},
+  prizeBreakdown: { jackpot_winners: 1 },
   status: "results_posted",
   sourceSnapshotId: snapshot.id,
   createdAt: "2025-01-05T22:30:00.000Z",
@@ -196,5 +196,127 @@ test("rejects malformed official numbers and incomplete prize snapshots", async 
       contributions: [],
     }),
     /prize rules/i
+  );
+});
+
+const matchTiers = [
+  { mainMatches: 5, bonusMatches: true, prizeType: "match_5_bonus_true", prizeAmount: "jackpot_estimate" },
+  { mainMatches: 4, bonusMatches: true, prizeType: "match_4_bonus_true", prizeAmount: "prize_breakdown" },
+  { mainMatches: 3, bonusMatches: false, prizeType: "match_3_bonus_false", prizeAmount: "prize_breakdown" },
+];
+
+function evaluateWith(options: {
+  lottery?: "powerball" | "mega_millions";
+  numberSets: Array<Record<string, unknown>>;
+  officialWinningNumbers?: Record<string, unknown>;
+  prizeBreakdown?: Record<string, unknown>;
+  extraTickets?: Array<Record<string, unknown>>;
+}) {
+  const lottery = options.lottery ?? "powerball";
+  const targetDrawing: Drawing = { ...drawing, lottery };
+  const optionSnapshot: CalculationSnapshot = {
+    ...snapshot,
+    lottery,
+    priceSnapshot: { ...snapshot.priceSnapshot, prizeTiers: matchTiers },
+  };
+  const optionResult: DrawingResult = {
+    ...result,
+    officialWinningNumbers: options.officialWinningNumbers ?? { numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+    prizeBreakdown: options.prizeBreakdown ?? {},
+  };
+  const tickets: Contribution[] = [options.numberSets, ...(options.extraTickets ?? []).map((set) => [set])].map((numberSets, index) => ({
+    ...contribution({ id: `ticket-${index}`, userId: `u${index}`, drawingDate: drawing.drawingDate, drawingCount: 1, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 }),
+    lottery,
+    numberSets,
+  }));
+  return new SnapshotLotteryPrizeEvaluator().evaluate({
+    drawing: targetDrawing,
+    drawings: [{ ...targetDrawing, id: "d-1", drawingDate: "2025-01-01" }, targetDrawing],
+    result: optionResult,
+    snapshot: optionSnapshot,
+    contributions: tickets,
+  });
+}
+
+test("pays Mega Millions plays by their recorded multiplier without tier collisions", async () => {
+  const prizeBreakdown = { match_4_bonus_true_x2: 20000, match_4_bonus_true_x10: 100000 };
+  const evaluation = await evaluateWith({
+    lottery: "mega_millions",
+    numberSets: [
+      { numbers: [1, 2, 3, 4, 9], bonusNumber: "6", megaplier: 2 },
+      { numbers: [1, 2, 3, 4, 9], bonusNumber: "6", megaplier: 10 },
+    ],
+    prizeBreakdown,
+  });
+
+  assert.deepEqual(evaluation.wins.map(({ prizeType, amount }) => ({ prizeType, amount })), [
+    { prizeType: "match_4_bonus_true_x2", amount: 20000 },
+    { prizeType: "match_4_bonus_true_x10", amount: 100000 },
+  ]);
+});
+
+test("rejects winning Mega Millions plays without a multiplier or with an unsupported one", async () => {
+  const prizeBreakdown = { match_4_bonus_true_x2: 20000 };
+  await assert.rejects(
+    () => evaluateWith({ lottery: "mega_millions", numberSets: [{ numbers: [1, 2, 3, 4, 9], bonusNumber: "6" }], prizeBreakdown }),
+    /missing its recorded multiplier/i
+  );
+  await assert.rejects(
+    () => evaluateWith({ lottery: "mega_millions", numberSets: [{ numbers: [1, 2, 3, 4, 9], bonusNumber: "6", megaplier: 6 }], prizeBreakdown }),
+    /invalid Mega Millions multiplier/i
+  );
+  await assert.rejects(
+    () => evaluateWith({ lottery: "powerball", numberSets: [{ numbers: [1, 2, 3, 4, 9], bonusNumber: "6", megaplier: 2 }], prizeBreakdown }),
+    /add-ons that its lottery does not offer/i
+  );
+});
+
+test("applies the official Power Play prize only to plays that bought it", async () => {
+  const evaluation = await evaluateWith({
+    numberSets: [
+      { numbers: [1, 2, 3, 4, 9], bonusNumber: "6", powerPlay: true },
+      { numbers: [1, 2, 3, 4, 9], bonusNumber: "6" },
+    ],
+    prizeBreakdown: { match_4_bonus_true: 50000, match_4_bonus_true_power_play: 150000 },
+  });
+
+  assert.deepEqual(evaluation.wins.map(({ prizeType, amount }) => ({ prizeType, amount })), [
+    { prizeType: "match_4_bonus_true_power_play", amount: 150000 },
+    { prizeType: "match_4_bonus_true", amount: 50000 },
+  ]);
+});
+
+test("evaluates Double Play separately against its own numbers", async () => {
+  const evaluation = await evaluateWith({
+    numberSets: [{ numbers: [1, 2, 3, 4, 5], bonusNumber: "6", doublePlay: true }, { numbers: [1, 2, 3, 4, 5], bonusNumber: "6" }].slice(0, 1),
+    officialWinningNumbers: { numbers: [30, 31, 32, 33, 34], bonusNumber: 20, doublePlay: { numbers: [1, 2, 3, 40, 41], bonusNumber: 6 } },
+    prizeBreakdown: { double_play_match_3_bonus_true: 500 },
+  });
+  assert.deepEqual(evaluation.wins.map(({ prizeType, amount }) => ({ prizeType, amount })), [
+    { prizeType: "double_play_match_3_bonus_true", amount: 500 },
+  ]);
+
+  await assert.rejects(
+    () => evaluateWith({ numberSets: [{ numbers: [1, 2, 3, 4, 5], bonusNumber: "6", doublePlay: true }], prizeBreakdown: {} }),
+    /missing the Double Play numbers/i
+  );
+});
+
+test("splits the jackpot across all official winners and refuses unsafe counts", async () => {
+  const jackpot = { numbers: [1, 2, 3, 4, 5], bonusNumber: "6" };
+  const split = await evaluateWith({
+    numberSets: [jackpot],
+    extraTickets: [jackpot],
+    prizeBreakdown: { jackpot_winners: 3 },
+  });
+  assert.deepEqual(split.wins.map(({ amount }) => amount), [8333333.33, 8333333.33]);
+
+  await assert.rejects(
+    () => evaluateWith({ numberSets: [jackpot], extraTickets: [jackpot], prizeBreakdown: { jackpot_winners: 1 } }),
+    /jackpot winner count/i
+  );
+  await assert.rejects(
+    () => evaluateWith({ numberSets: [jackpot], prizeBreakdown: {} }),
+    /jackpot winner count/i
   );
 });

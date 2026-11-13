@@ -148,6 +148,7 @@ async function setup() {
       official_source_content_type TEXT,
       official_source_document TEXT,
       official_source_sha256 TEXT,
+      official_source_captured_at TIMESTAMPTZ,
       status drawing_status NOT NULL DEFAULT 'pending',
       calculation_started_at TIMESTAMPTZ,
       calculated_at TIMESTAMPTZ,

@@ -12,8 +12,8 @@
 - [x] Fetch Michigan Lottery rules and results through its public GraphQL endpoint; retain source documents and hashes.
 - [x] Fetch Powerball and Mega Millions next-drawing jackpot estimates and cash values; store them on the matching drawing with source metadata.
 - [x] Make official-data refreshes idempotent and clear stale awards when normalized rules or results change.
-- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (62 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
-- [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations, OIDC user linking, API overview/contribution operations, and refresh target discovery ran in a temporary schema).
+- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (88 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
+- [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations 001-008, OIDC user creation/linking, membership privacy and permissions, ownership transfer, account/club closure, payout notifications, preference/read state, email delivery/retries, API overview/contribution operations, refresh target discovery, and retention cleanup ran in a temporary schema).
 - [x] Fix PostgreSQL enum parameter inference in the drawing-status update.
 - [x] Smoke-test both jackpot/cash endpoints against their live next-drawing dates.
 - [x] Apply migrations 001 through 003 to the local PostgreSQL database.
@@ -50,16 +50,21 @@
 - [x] Distinguish pending results, pending calculations, calculated results, and recalculations in the results view.
 - [x] Replace implicit demo mode with authenticated HTTP by default; keep demo preview explicit for development.
 - [x] Build the frontend production bundle and audit production dependencies (0 vulnerabilities).
-
-## Remaining
-
-- [x] Add profile sign-out, atomic Creator transfer, guarded club closure, and authenticated account closure with active-club ownership guards.
-- [x] Add identity-provider account registration entry point and provision app users on first verified OIDC sign-in.
-
 - [x] Recalculate and audit tickets changed after a drawing cutoff or posted result.
 - [x] Run drawing calculations after official results are refreshed and expose awards and payout allocations.
 - [x] Add privacy-safe club discovery, join requests, moderation, role management, leave, and guarded member removal to the authenticated API and frontend.
-- [ ] Monitor the site-owned API response formats and confirm permitted use before production reliance; these endpoints are not documented public APIs.
-- [ ] Define retention and cleanup for raw source documents and historical calculation artifacts.
-- [ ] Add notification delivery and recalculation notices after payout calculations complete.
-- [ ] Complete production review of ticket options, jackpot valuation, and payout rules before using calculated amounts operationally.
+- [x] Add profile sign-out, atomic Creator transfer, guarded club closure, and authenticated account closure with active-club ownership guards.
+- [x] Add identity-provider account registration and provision app users on first verified OIDC sign-in.
+- [x] Configure local Keycloak SMTP email verification and confirm new-account verification delivery.
+- [x] Validate Michigan Lottery GraphQL result shapes and fail refreshes on missing or malformed fields so drift reaches retry and alert monitoring.
+- [x] Define 12-month raw-source body retention and closed-club history retention; add a dry-run-by-default cleanup job and PostgreSQL coverage.
+- [x] Add transactional in-app/email payout notices, recalculation-change notices, user preferences, and lease-based SMTP delivery with five bounded attempts.
+- [x] Configure API notification SMTP against Google Workspace and verify connection/authentication without sending a test message.
+- [x] Record owner determination that separate permission is not required to use Michigan Lottery's site-owned endpoints for this project.
+- [x] Review ticket options, jackpot valuation, and payout logic against current Michigan Lottery pages and live result responses; document blockers below.
+- [x] Add per-play Power Play, Double Play, and Mega Millions multiplier fields to ticket data, API validation, pricing (+$1 each Powerball add-on per play per drawing), and the ticket dialog.
+- [x] Verify Michigan winning numbers against the official Powerball/Mega Millions draw data, then store Power Play multiplier, Double Play numbers, draw-specific prize tables, jackpot, and official jackpot winner count; fail refreshes on mismatches or malformed tables.
+- [x] Price awards by recorded multiplier, Power Play, and Double Play using distinct prize keys; split jackpots across the official winner count and refuse unsafe counts. Regression tests cover each case.
+- [x] Owner confirmed jackpot payouts use the published annuity estimate; cash value is stored for reference and is not used for payout calculations.
+
+## Remaining

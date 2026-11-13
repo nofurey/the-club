@@ -105,7 +105,11 @@ export class MichiganLotteryGraphqlProvider implements OfficialLotteryProvider {
     });
     const document = this.toDocument(response.rawBody, response.contentType);
     const winningNumbers = response.data.winningNumbers;
-    const result = this.parseResult(winningNumbers, response.data.payout, drawing.lottery);
+    const payout = response.data.payout;
+    if (!this.isRecord(payout) || !Array.isArray(payout.payoutGeneric)) {
+      throw new Error("Michigan Lottery GraphQL response is missing the payout rows field.");
+    }
+    const result = this.parseResult(winningNumbers, response.data.payout, drawing.lottery, drawing.drawingDate);
     return { document, result };
   }
 
@@ -295,18 +299,38 @@ export class MichiganLotteryGraphqlProvider implements OfficialLotteryProvider {
   private parseResult(
     winningNumbers: unknown,
     payout: unknown,
-    lottery: LotteryType
+    lottery: LotteryType,
+    drawingDate: string
   ): ParsedOfficialResult | null {
-    if (!this.isRecord(winningNumbers) || winningNumbers.resultsPending === true) {
+    if (!this.isRecord(winningNumbers)) {
+      throw new Error("Michigan Lottery GraphQL response is missing the winning numbers object.");
+    }
+    if (typeof winningNumbers.resultsPending !== "boolean") {
+      throw new Error("Michigan Lottery GraphQL response is missing the results-pending flag.");
+    }
+    if (winningNumbers.resultsPending) {
       return null;
     }
-    if (!Array.isArray(winningNumbers.drawNumbers) || winningNumbers.drawNumbers.length === 0) {
+    const bonusNumber = lottery === "powerball" ? winningNumbers.powerball : winningNumbers.megaball;
+    if (
+      winningNumbers.drawNumbers == null && bonusNumber == null &&
+      drawingDate >= this.dateAtTimeZone(this.now().toISOString(), "America/New_York")
+    ) {
       return null;
+    }
+    const mainNumberMax = lottery === "powerball" ? 69 : 70;
+    const bonusNumberMax = lottery === "powerball" ? 26 : 24;
+    if (
+      !Array.isArray(winningNumbers.drawNumbers) ||
+      winningNumbers.drawNumbers.length !== 5 ||
+      winningNumbers.drawNumbers.some((number) => !Number.isInteger(number) || number < 1 || number > mainNumberMax) ||
+      new Set(winningNumbers.drawNumbers).size !== winningNumbers.drawNumbers.length
+    ) {
+      throw new Error("Michigan Lottery GraphQL response contains invalid main winning numbers.");
     }
 
-    const bonusNumber = lottery === "powerball" ? winningNumbers.powerball : winningNumbers.megaball;
-    if (bonusNumber == null) {
-      throw new Error("Michigan Lottery returned draw numbers without the bonus number.");
+    if (!Number.isInteger(bonusNumber) || bonusNumber < 1 || bonusNumber > bonusNumberMax) {
+      throw new Error("Michigan Lottery GraphQL response contains an invalid bonus winning number.");
     }
 
     const prizeBreakdown = this.parsePayout(payout);

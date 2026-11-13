@@ -4,10 +4,13 @@ import { buildClubApiServer } from "./club-api-server";
 import { createOidcTokenVerifier } from "./oidc-auth";
 import { PostgresClubApiRepository } from "./postgres-club-api-repository";
 import { MichiganLotteryGraphqlProvider } from "../services/michigan-lottery-graphql-provider";
+import { MuslVerifiedLotteryProvider } from "../services/musl-verified-lottery-provider";
 import { OfficialLotteryDataService } from "../services/official-lottery-data-service";
 import { PostgresClubRepository } from "../services/postgres-club-repository";
 import { DrawingCalculationService } from "../services/drawing-calculation-service";
 import { SnapshotLotteryPrizeEvaluator } from "../services/lottery-prize-evaluator";
+import { PostgresNotificationEmailDelivery } from "../services/notification-email-delivery";
+import { createSmtpNotificationEmailSender } from "../services/smtp-notification-email-sender";
 import { wrapPgLikeClient } from "../services/postgres-client";
 
 function requiredEnvironment(name: string): string {
@@ -36,7 +39,9 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString });
   const database = wrapPgLikeClient(pool);
   const repository = new PostgresClubApiRepository(database);
-  const officialProvider = new MichiganLotteryGraphqlProvider();
+  const emailSender = createSmtpNotificationEmailSender();
+  const emailDelivery = emailSender ? new PostgresNotificationEmailDelivery(database, emailSender) : null;
+  const officialProvider = new MuslVerifiedLotteryProvider(new MichiganLotteryGraphqlProvider());
   const server = await buildClubApiServer({
     repository,
     prepareTicketDrawings: async (userId, clubId, drawings) => {
@@ -80,10 +85,34 @@ async function main(): Promise<void> {
     logger: true,
   });
 
+  let notificationTimer: ReturnType<typeof setInterval> | null = null;
+  let notificationDeliveryRunning = false;
+  if (emailDelivery && emailSender) {
+    const deliverQueuedEmails = async () => {
+      if (notificationDeliveryRunning) return;
+      notificationDeliveryRunning = true;
+      try {
+        const summary = await emailDelivery.deliverQueued();
+        if (summary.sent || summary.failed) server.log.info(summary, "Notification email batch completed");
+      } catch (error) {
+        server.log.error({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Notification email batch failed");
+      } finally {
+        notificationDeliveryRunning = false;
+      }
+    };
+    void deliverQueuedEmails();
+    notificationTimer = setInterval(() => { void deliverQueuedEmails(); }, 60_000);
+    notificationTimer.unref();
+  } else {
+    server.log.warn("Notification SMTP is not configured; email notifications remain queued");
+  }
+
   let closing = false;
   const close = async (): Promise<void> => {
     if (closing) return;
     closing = true;
+    if (notificationTimer) clearInterval(notificationTimer);
+    emailSender?.close();
     await server.close();
     await pool.end();
   };

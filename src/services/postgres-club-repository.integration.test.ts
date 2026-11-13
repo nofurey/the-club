@@ -7,12 +7,14 @@ import { Client } from "pg";
 
 import type { CalculationSnapshot, DrawingResult, DrawingSizeSnapshot, PrizeAward } from "../domain";
 import { ClubService } from "./club-service";
-import { PostgresClubRepository } from "./postgres-club-repository";
+import { PostgresClubRepository, type DbLikeClient } from "./postgres-club-repository";
+import { PostgresRetentionCleanup } from "./postgres-retention-cleanup";
 import { PostgresOfficialDataRefreshTargetSource } from "./postgres-official-data-refresh-target-source";
 import { PostgresClubApiRepository } from "../api/postgres-club-api-repository";
 import { buildClubApiServer } from "../api/club-api-server";
 import type { OidcIdentity } from "../api/oidc-auth";
 import { DrawingCalculationService } from "./drawing-calculation-service";
+import { PostgresNotificationEmailDelivery } from "./notification-email-delivery";
 import { SnapshotLotteryPrizeEvaluator } from "./lottery-prize-evaluator";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -46,6 +48,9 @@ postgresTest(
       "003_drawing_jackpot_estimates.sql",
       "004_oidc_user_subjects.sql",
       "005_contribution_photos.sql",
+      "006_source_retention_metadata.sql",
+      "007_notification_delivery.sql",
+      "008_notification_delivery_leases.sql",
     ]) {
       const migrationPath = path.resolve(__dirname, "../../database/migrations", migrationName);
       await client.query(fs.readFileSync(migrationPath, "utf8"));
@@ -62,9 +67,9 @@ postgresTest(
     const repository = new PostgresClubRepository({
       query: (text: string, params: any[] = []) => client.query(text, params),
     });
-    const apiRepository = new PostgresClubApiRepository({
+    const testDatabaseClient: DbLikeClient = {
       query: (text: string, params: any[] = []) => client.query(text, params),
-      transaction: async (operation) => {
+      transaction: async <T>(operation: (transactionClient: DbLikeClient) => Promise<T>): Promise<T> => {
         await client.query("BEGIN");
         try {
           const result = await operation({ query: (text: string, params: any[] = []) => client.query(text, params) });
@@ -75,7 +80,8 @@ postgresTest(
           throw error;
         }
       },
-    });
+    };
+    const apiRepository = new PostgresClubApiRepository(testDatabaseClient);
     const linkedOwner = await apiRepository.provisionOidcUser({
       subject: `oidc-${ownerId}`,
       email: `${ownerId}@integration.test`,
@@ -229,8 +235,12 @@ postgresTest(
     );
     const emptyClubOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
     assert.equal(emptyClubOverview?.contributions.length, 0);
+    const nextByLottery = new Map<string, string>();
     for (const drawing of activeSchedule ?? []) {
-      assert.equal(emptyClubOverview?.results.some((item) => item.drawing.id === drawing.id), true);
+      if (!nextByLottery.has(drawing.lottery)) nextByLottery.set(drawing.lottery, drawing.id);
+    }
+    for (const drawing of activeSchedule ?? []) {
+      assert.equal(emptyClubOverview?.results.some((item) => item.drawing.id === drawing.id), nextByLottery.get(drawing.lottery) === drawing.id);
     }
     await client.query(
       `
@@ -331,7 +341,9 @@ postgresTest(
     assert.equal(optionsByDate.get(firstUpcomingDate)?.ticketPrice, 2);
     assert.equal(optionsByDate.get(firstUpcomingDate)?.numberRules?.mainNumberMax, 69);
     assert.deepEqual(optionsByDate.get(firstUpcomingDate)?.drawingCountOptions, [1, 5, 10, 15, 20, 25, 30].filter((count) => count <= activeSchedule!.length));
-    assert.equal(options?.some((option) => option.drawingDate < easternToday), false);
+    const pastTicketDate = options?.find((option) => option.drawingDate === "2026-11-09");
+    assert.equal(pastTicketDate?.existingTicketDate, true);
+    assert.equal((await apiRepository.getTicketDrawingOptions(memberId, club.club.id))?.some((option) => option.drawingDate === "2026-11-09"), false);
     for (const drawing of activeSchedule ?? []) assert.equal(optionsByDate.has(drawing.drawingDate), true);
     assert.equal(await apiRepository.getTicketDrawingOptions(randomUUID(), club.club.id), null);
 
@@ -393,17 +405,23 @@ postgresTest(
     const editableOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
     assert.equal(editableOverview?.contributions.find((item) => item.id === editableContribution.id)?.canEdit, true);
     assert.equal((await apiRepository.getClubOverview(memberId, club.club.id))?.contributions.find((item) => item.id === editableContribution.id)?.canEdit, false);
+    assert.equal(editableOverview?.results.some((item) => item.drawing.id === futureDrawing.id), true);
+    const laterPowerballIds = new Set((activeSchedule ?? []).filter((drawing) => drawing.lottery === "powerball" && drawing.drawingDate > futureDrawing.drawingDate).map((drawing) => drawing.id));
+    const memberResults = (await apiRepository.getClubOverview(memberId, club.club.id))?.results ?? [];
+    assert.equal(memberResults.some((item) => laterPowerballIds.has(item.drawing.id)), false);
+    assert.equal(editableOverview?.results.some((item) => laterPowerballIds.has(item.drawing.id)), false);
     const editedContribution = await apiRepository.updateContribution(ownerId, club.club.id, editableContribution.id, {
       lottery: "powerball",
       drawingDate: futureDrawing.drawingDate,
       drawingCount: 1,
       numberSets: [
         { numbers: [2, 4, 6, 8, 10], bonusNumber: 12 },
-        { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 },
+        { numbers: [1, 3, 5, 7, 9], bonusNumber: 11, powerPlay: true },
       ],
     });
     assert.equal(editedContribution.contribution.version, editableContribution.version + 1);
-    assert.equal(editedContribution.contribution.costUsd, 4);
+    assert.equal(editedContribution.contribution.costUsd, 5);
+    assert.equal((editedContribution.contribution.numberSets[1] as { powerPlay?: boolean }).powerPlay, true);
     assert.equal(editedContribution.contribution.hasTicketPhoto, true);
     assert.deepEqual(await apiRepository.getContributionPhoto(memberId, club.club.id, editableContribution.id), photo);
     await assert.rejects(apiRepository.updateContribution(memberId, club.club.id, editableContribution.id, {
@@ -503,9 +521,79 @@ postgresTest(
       createdAt: now,
       updatedAt: now,
     };
-    await repository.replacePrizeAwardsAndCompleteResult(stored.result.id, [award], "calculated", now);
+    await repository.replacePrizeAwardsAndCompleteResult(stored.result.id, [award], "calculated", now, [{
+      userId: ownerId,
+      clubId: club.club.id,
+      drawingId,
+      type: "payout_calculated",
+      message: "Test Club: Powerball payout calculated.",
+    }]);
     const persistedResult = await repository.findDrawingResultByDrawingAndClub(drawingId, club.club.id);
     assert.equal(persistedResult?.status, "calculated");
+    const calculationNotifications = await client.query(
+      "SELECT channel, status FROM notifications WHERE user_id = $1 AND drawing_id = $2 ORDER BY channel",
+      [ownerId, drawingId]
+    );
+    assert.deepEqual(calculationNotifications.rows, [{ channel: "in_app", status: "sent" }, { channel: "email", status: "queued" }]);
+
+    const deliveredEmails: Array<{ to: string; subject: string; text: string }> = [];
+    const notificationDelivery = new PostgresNotificationEmailDelivery({
+      query: (text: string, params: any[] = []) => client.query(text, params),
+      transaction: async (operation) => {
+        await client.query("BEGIN");
+        try {
+          const value = await operation({ query: (text: string, params: any[] = []) => client.query(text, params) });
+          await client.query("COMMIT");
+          return value;
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      },
+    }, { send: async (email) => { deliveredEmails.push(email); } });
+    const deliverySummary = await notificationDelivery.deliverQueued();
+    assert.ok(deliverySummary.sent >= 1);
+    assert.equal(deliveredEmails.some((email) => email.to === `${ownerId}@integration.test`), true);
+    const sentEmail = await client.query(
+      "SELECT status, delivery_attempts, sent_at FROM notifications WHERE user_id = $1 AND drawing_id = $2 AND channel = 'email'",
+      [ownerId, drawingId]
+    );
+    assert.equal(sentEmail.rows[0].status, "sent");
+    assert.equal(sentEmail.rows[0].delivery_attempts, 1);
+    assert.ok(sentEmail.rows[0].sent_at);
+    const defaultPreferences = await apiRepository.getNotificationPreferences(ownerId);
+    assert.equal(defaultPreferences.inAppEnabled, true);
+    assert.equal(defaultPreferences.emailEnabled, true);
+    const inbox = await apiRepository.listNotifications(ownerId);
+    const payoutNotice = inbox.find((notification) => notification.drawingId === drawingId);
+    assert.ok(payoutNotice);
+    assert.equal(await apiRepository.markNotificationRead(ownerId, payoutNotice.id), true);
+    const readNotice = (await apiRepository.listNotifications(ownerId)).find((notification) => notification.id === payoutNotice.id);
+    assert.ok(readNotice?.readAt);
+    const savedPreferences = await apiRepository.updateNotificationPreferences(ownerId, { inAppEnabled: true, emailEnabled: false });
+    assert.equal(savedPreferences.emailEnabled, false);
+
+    const failedNotificationId = randomUUID();
+    await client.query(
+      `INSERT INTO notifications (id, user_id, club_id, drawing_id, type, channel, status, message)
+       VALUES ($1, $2, $3, $4, 'payout_calculated', 'email', 'queued', 'Retry test notification')`,
+      [failedNotificationId, memberId, club.club.id, drawingId]
+    );
+    const failingDelivery = new PostgresNotificationEmailDelivery(testDatabaseClient, {
+      async send() {
+        const error = new Error("Temporary SMTP failure") as Error & { code: string };
+        error.code = "ETIMEDOUT";
+        throw error;
+      },
+    });
+    for (let attempt = 0; attempt < 5; attempt++) await failingDelivery.deliverQueued();
+    const failedNotification = await client.query(
+      "SELECT status, delivery_attempts, last_error FROM notifications WHERE id = $1",
+      [failedNotificationId]
+    );
+    assert.equal(failedNotification.rows[0].status, "failed");
+    assert.equal(failedNotification.rows[0].delivery_attempts, 5);
+    assert.equal(failedNotification.rows[0].last_error, "ETIMEDOUT");
 
     const overview = await apiRepository.getClubOverview(ownerId, club.club.id);
     assert.equal(overview?.currentUser.id, ownerId);
@@ -549,7 +637,7 @@ postgresTest(
     assert.deepEqual(createdClubResponse.json().club.supportedLotteries, ["powerball", "mega_millions"]);
     assert.equal(createdClubResponse.json().contributions.length, 0);
     assert.equal(preparedDrawingIds.length, 2);
-    assert.equal(preparedDrawingIds.every((drawingId) => createdClubResponse.json().results.some((item: any) => item.drawing.id === drawingId)), true);
+    assert.equal(["powerball", "mega_millions"].every((lottery) => createdClubResponse.json().results.filter((item: any) => item.drawing.lottery === lottery).length === 1), true);
 
     const api = await buildClubApiServer({
       repository: apiRepository,
@@ -588,6 +676,57 @@ postgresTest(
     assert.equal(closedClub.statusCode, 204);
     const closedClubRow = await client.query("SELECT status FROM clubs WHERE id = $1", [searchableClub.club.id]);
     assert.equal(closedClubRow.rows[0].status, "closed");
+
+    await client.query("UPDATE clubs SET closed_at = NOW() - INTERVAL '13 months' WHERE id = $1", [searchableClub.club.id]);
+    await client.query(
+      "UPDATE calculation_snapshots SET captured_at = NOW() - INTERVAL '13 months', source_document = 'expired rules source body' WHERE club_id = $1 AND source_document IS NOT NULL",
+      [club.club.id]
+    );
+    await client.query(
+      "UPDATE drawing_results SET official_source_captured_at = NOW() - INTERVAL '13 months', official_source_document = 'expired result source body' WHERE club_id = $1 AND official_source_document IS NOT NULL",
+      [club.club.id]
+    );
+    await client.query(
+      "UPDATE drawings SET drawing_size_captured_at = NOW() - INTERVAL '13 months', drawing_size_source_document = 'expired estimate source body' WHERE id = $1",
+      [drawingId]
+    );
+    const cleanup = new PostgresRetentionCleanup(testDatabaseClient);
+    const preview = await cleanup.preview();
+    assert.ok(preview.calculationSourceBodies > 0);
+    assert.ok(preview.resultSourceBodies > 0);
+    assert.ok(preview.drawingSizeSourceBodies > 0);
+    assert.equal(preview.closedClubs, 1);
+    assert.equal((await client.query("SELECT id FROM clubs WHERE id = $1", [searchableClub.club.id])).rows.length, 1);
+    assert.equal((await client.query(
+      "SELECT source_document FROM calculation_snapshots WHERE club_id = $1 AND source_document = 'expired rules source body' LIMIT 1",
+      [club.club.id]
+    )).rows.length > 0, true);
+
+    const cleanupResult = await cleanup.apply();
+    assert.equal(cleanupResult.closedClubs, 1);
+    const retainedSnapshot = await client.query(
+      "SELECT source_document, source_sha256, price_snapshot FROM calculation_snapshots WHERE club_id = $1 AND source_sha256 IS NOT NULL ORDER BY captured_at LIMIT 1",
+      [club.club.id]
+    );
+    assert.equal(retainedSnapshot.rows[0].source_document, null);
+    assert.ok(retainedSnapshot.rows[0].source_sha256);
+    assert.ok(retainedSnapshot.rows[0].price_snapshot);
+    const retainedResult = await client.query(
+      "SELECT official_source_document, official_source_sha256, official_source_captured_at FROM drawing_results WHERE club_id = $1 ORDER BY created_at LIMIT 1",
+      [club.club.id]
+    );
+    assert.equal(retainedResult.rows[0].official_source_document, null);
+    assert.ok(retainedResult.rows[0].official_source_sha256);
+    assert.ok(retainedResult.rows[0].official_source_captured_at);
+    const retainedEstimate = await client.query(
+      "SELECT drawing_size_source_document, drawing_size_source_sha256, drawing_size_captured_at FROM drawings WHERE id = $1",
+      [drawingId]
+    );
+    assert.equal(retainedEstimate.rows[0].drawing_size_source_document, null);
+    assert.ok(retainedEstimate.rows[0].drawing_size_source_sha256);
+    assert.ok(retainedEstimate.rows[0].drawing_size_captured_at);
+    assert.equal((await client.query("SELECT id FROM clubs WHERE id = $1", [searchableClub.club.id])).rows.length, 0);
+    assert.equal((await client.query("SELECT id FROM drawing_results WHERE club_id = $1", [searchableClub.club.id])).rows.length, 0);
     await apiRepository.closeAccount(unaffiliatedId);
     const closedUser = await client.query("SELECT status, closed_at FROM users WHERE id = $1", [unaffiliatedId]);
     assert.equal(closedUser.rows[0].status, "closed");

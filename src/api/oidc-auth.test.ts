@@ -65,7 +65,7 @@ test("verifies OIDC signatures, issuer, audience, and verified-email claims", as
     .setIssuedAt()
     .setExpirationTime("2m")
     .sign(privateKey);
-  await assert.rejects(() => verify(unverifiedEmail), /verified email/i);
+  await assert.rejects(() => verify(unverifiedEmail), /verify your email/i);
 });
 
 test("requires HTTPS for non-loopback OIDC issuer and JWKS URLs", () => {

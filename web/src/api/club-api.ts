@@ -2,7 +2,7 @@ import { UserManager, WebStorageStateStore, type UserManagerSettings } from "oid
 
 import type { Contribution } from "../../../src/domain";
 import { demoClubApi } from "./demo-club-api";
-import type { Club, ClubApi, ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionResult, User, UserClubSummary } from "./contracts";
+import type { Club, ClubApi, ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, Notification, NotificationPreference, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionResult, UpdateNotificationPreferencesRequest, User, UserClubSummary } from "./contracts";
 
 class ApiResponseError extends Error {
   constructor(message: string, readonly status: number) {
@@ -53,7 +53,7 @@ class OidcHttpClubApi implements ClubApi {
   }
 
   async signOut(): Promise<void> {
-    await this.userManager.removeUser();
+    await this.userManager.signoutRedirect();
   }
 
   async closeAccount(): Promise<void> {
@@ -64,6 +64,28 @@ class OidcHttpClubApi implements ClubApi {
     const response = await this.request<{ user: User }>("/me");
     if (!response.user) throw new Error("The signed-in user could not be loaded.");
     return response.user;
+  }
+
+  async getNotifications(): Promise<Notification[]> {
+    const response = await this.request<{ notifications: Notification[] }>("/me/notifications");
+    return response.notifications;
+  }
+
+  async getNotificationPreferences(): Promise<NotificationPreference> {
+    const response = await this.request<{ preferences: NotificationPreference }>("/me/notification-preferences");
+    return response.preferences;
+  }
+
+  async updateNotificationPreferences(input: UpdateNotificationPreferencesRequest): Promise<NotificationPreference> {
+    const response = await this.request<{ preferences: NotificationPreference }>("/me/notification-preferences", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+    return response.preferences;
+  }
+
+  async markNotificationRead(notificationId: string): Promise<void> {
+    await this.requestResponse(`/me/notifications/${encodeURIComponent(notificationId)}/read`, { method: "POST" });
   }
 
   async getOverview(): Promise<ClubOverview> {
@@ -233,6 +255,10 @@ class UnconfiguredClubApi implements ClubApi {
   async signOut(): Promise<void> { throw new Error("OIDC is not configured."); }
   async closeAccount(): Promise<void> { throw new Error("OIDC is not configured."); }
   async getCurrentUser(): Promise<User> { throw new Error("OIDC is not configured."); }
+  async getNotifications(): Promise<Notification[]> { throw new Error("OIDC is not configured."); }
+  async getNotificationPreferences(): Promise<NotificationPreference> { throw new Error("OIDC is not configured."); }
+  async updateNotificationPreferences(): Promise<NotificationPreference> { throw new Error("OIDC is not configured."); }
+  async markNotificationRead(): Promise<void> { throw new Error("OIDC is not configured."); }
   async getOverview(): Promise<ClubOverview> { throw new Error("OIDC is not configured."); }
   async getMyClubs(): Promise<UserClubSummary[]> { throw new Error("OIDC is not configured."); }
   async searchClubs(): Promise<ClubDiscoverySummary[]> { throw new Error("OIDC is not configured."); }

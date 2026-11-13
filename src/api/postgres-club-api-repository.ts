@@ -6,6 +6,8 @@ import type {
   Contribution,
   Drawing,
   DrawingResult,
+  Notification,
+  NotificationPreference,
   LotteryType,
   PayoutConfiguration,
   ThresholdRule,
@@ -15,7 +17,8 @@ import type { DbLikeClient } from "../services/postgres-club-repository";
 import { ClubService } from "../services/club-service";
 import { PostgresClubRepository } from "../services/postgres-club-repository";
 import { getDrawingCountOptions, getMaxDrawings, getMaxNumberSets, getUpcomingDrawingDates, isAllowedDrawingCount } from "../services/drawing-schedule";
-import type { ClubDiscoverySummary, ClubOverview, ClubMemberView, CreateClubRequest, CreateContributionInput, DrawingPayoutView, DrawingResultView, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, TicketNumberSetInput, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UserClubSummary } from "./contracts";
+import { contributionCost, hasValidPlayOptions, storedPlayOptions } from "../services/ticket-options";
+import type { ClubDiscoverySummary, ClubOverview, ClubMemberView, CreateClubRequest, CreateContributionInput, DrawingPayoutView, DrawingResultView, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, TicketNumberSetInput, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UpdateNotificationPreferencesRequest, UserClubSummary } from "./contracts";
 import { ClubApiError } from "./errors";
 import type { ClubApiRepository, TicketPhoto } from "./club-api-server";
 import type { OidcIdentity } from "./oidc-auth";
@@ -66,6 +69,60 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       [randomUUID(), identity.subject, identity.email, identity.displayName]
     );
     return this.toUser(rows[0]);
+  }
+
+  async listNotifications(userId: string): Promise<Notification[]> {
+    const { rows } = await this.client.query(
+      "SELECT * FROM notifications WHERE user_id = $1 AND channel = 'in_app' ORDER BY created_at DESC LIMIT 50",
+      [userId]
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      clubId: row.club_id,
+      drawingId: row.drawing_id ?? null,
+      type: row.type,
+      channel: row.channel,
+      status: row.status,
+      message: row.message,
+      recalculationType: row.recalculation_type ?? null,
+      sentAt: row.sent_at ? this.toIso(row.sent_at) : null,
+      readAt: row.read_at ? this.toIso(row.read_at) : null,
+      createdAt: this.toIso(row.created_at),
+    }));
+  }
+
+  async getNotificationPreferences(userId: string): Promise<NotificationPreference> {
+    await this.client.query(
+      "INSERT INTO notification_preferences (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+      [userId]
+    );
+    const { rows } = await this.client.query("SELECT * FROM notification_preferences WHERE user_id = $1 LIMIT 1", [userId]);
+    return this.toNotificationPreference(rows[0]);
+  }
+
+  async updateNotificationPreferences(userId: string, input: UpdateNotificationPreferencesRequest): Promise<NotificationPreference> {
+    const { rows } = await this.client.query(
+      `INSERT INTO notification_preferences (user_id, in_app_enabled, email_enabled, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (user_id) DO UPDATE
+       SET in_app_enabled = EXCLUDED.in_app_enabled,
+           email_enabled = EXCLUDED.email_enabled,
+           updated_at = NOW()
+       RETURNING *`,
+      [userId, input.inAppEnabled, input.emailEnabled]
+    );
+    return this.toNotificationPreference(rows[0]);
+  }
+
+  async markNotificationRead(userId: string, notificationId: string): Promise<boolean> {
+    const { rows } = await this.client.query(
+      `UPDATE notifications SET read_at = COALESCE(read_at, NOW())
+       WHERE id = $1 AND user_id = $2 AND channel = 'in_app'
+       RETURNING id`,
+      [notificationId, userId]
+    );
+    return Boolean(rows[0]);
   }
 
   async listUserClubs(userId: string): Promise<UserClubSummary[]> {
@@ -353,6 +410,12 @@ export class PostgresClubApiRepository implements ClubApiRepository {
             SELECT d.*
             FROM ranked_drawings d
             WHERE EXISTS (
+              SELECT 1 FROM drawing_results existing
+              WHERE existing.drawing_id = d.id AND existing.club_id = $1
+                AND existing.official_winning_numbers IS NOT NULL
+                AND existing.official_winning_numbers <> 'null'::jsonb
+            )
+            OR EXISTS (
               SELECT 1
               FROM contributions c
               JOIN ranked_drawings starts
@@ -362,17 +425,19 @@ export class PostgresClubApiRepository implements ClubApiRepository {
                 AND c.status NOT IN ('draft', 'archived')
                 AND starts.sequence_number <= d.sequence_number
                 AND starts.sequence_number + c.drawing_count > d.sequence_number
+                AND (d.drawing_date < (timezone('America/New_York', NOW()))::date OR c.user_id = $2)
             )
-            OR EXISTS (
-              SELECT 1 FROM drawing_results existing
-              WHERE existing.drawing_id = d.id AND existing.club_id = $1
-            )
-            OR EXISTS (
-              SELECT 1 FROM clubs active_club
-              WHERE active_club.id = $1
-                AND active_club.status = 'active'
-                AND d.lottery::text = ANY(active_club.supported_lotteries::text[])
-                AND d.drawing_date >= (timezone('America/New_York', NOW()))::date
+            OR (
+              d.id IN (
+                SELECT DISTINCT ON (next.lottery) next.id FROM drawings next
+                WHERE next.status = 'pending' AND next.drawing_date >= (timezone('America/New_York', NOW()))::date
+                ORDER BY next.lottery, next.drawing_date
+              )
+              AND EXISTS (
+                SELECT 1 FROM clubs active_club
+                WHERE active_club.id = $1 AND active_club.status = 'active'
+                  AND d.lottery::text = ANY(active_club.supported_lotteries::text[])
+              )
             )
           ),
           award_totals AS (
@@ -400,7 +465,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
           ORDER BY d.drawing_date DESC
           LIMIT 100
         `,
-        [clubId]
+        [clubId, userId]
       );
 
     if (!payoutRows.rows[0] || !thresholdRows.rows[0]) {
@@ -481,6 +546,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
 
     const { rows } = await this.client.query(
       `SELECT d.lottery, d.drawing_date,
+        (d.drawing_date < (timezone('America/New_York', NOW()))::date) AS existing_ticket_date,
         COUNT(*) OVER (PARTITION BY d.lottery ORDER BY d.drawing_date DESC) AS available_count,
         (SELECT s.price_snapshot FROM calculation_snapshots s
         JOIN drawings source_drawing ON source_drawing.id = s.drawing_id
@@ -488,9 +554,16 @@ export class PostgresClubApiRepository implements ClubApiRepository {
          ORDER BY s.captured_at DESC LIMIT 1) AS price_snapshot
        FROM drawings d
        WHERE d.lottery::text = ANY($2::text[])
-         AND d.drawing_date >= (timezone('America/New_York', NOW()))::date
+         AND (
+           d.drawing_date >= (timezone('America/New_York', NOW()))::date
+           OR EXISTS (
+             SELECT 1 FROM contributions c
+             WHERE c.club_id = $1 AND c.user_id = $3 AND c.lottery = d.lottery
+               AND c.drawing_date = d.drawing_date AND c.status = 'submitted'
+           )
+         )
        ORDER BY d.lottery, d.drawing_date`,
-      [clubId, clubs[0].supported_lotteries]
+      [clubId, clubs[0].supported_lotteries, userId]
     );
     return rows.map((row) => {
       const snapshot = this.parseJson(row.price_snapshot);
@@ -506,6 +579,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       return {
         lottery: row.lottery,
         drawingDate: this.dateOnly(row.drawing_date),
+        existingTicketDate: Boolean(row.existing_ticket_date),
         maxDrawingCount: Math.min(getMaxDrawings(row.lottery), Number(row.available_count)),
         drawingCountOptions: getDrawingCountOptions(row.lottery, Number(row.available_count)),
         maxNumberSets: getMaxNumberSets(row.lottery),
@@ -613,7 +687,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     const price = Number(snapshot?.ticketPrice);
     const numberRules = snapshot?.numberRules;
     const plays = input.numberSets ?? [{ numbers: input.numbers!, bonusNumber: input.bonusNumber! }];
-    if (!plays.length || plays.length > getMaxNumberSets(input.lottery) || !Number.isFinite(price) || price <= 0 || plays.some((play) => !this.validNumberSet(play, numberRules))) {
+    if (!plays.length || plays.length > getMaxNumberSets(input.lottery) || !Number.isFinite(price) || price <= 0 || plays.some((play) => !this.validNumberSet(play, numberRules) || !hasValidPlayOptions(input.lottery, play))) {
       throw new ClubApiError(400, "The ticket does not match the saved official game rules.", "invalid_number_set");
     }
 
@@ -624,6 +698,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       contributionId: id,
       numbers: play.numbers,
       bonusNumber: String(play.bonusNumber),
+      ...storedPlayOptions(play),
       createdAt,
     }));
     const { rows } = await this.client.query(
@@ -639,7 +714,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
         )
         SELECT inserted.*, ($10::bytea IS NOT NULL) AS has_ticket_photo FROM inserted
       `,
-      [id, clubId, userId, input.lottery, input.drawingDate, input.drawingCount, JSON.stringify(numberSets), price * input.drawingCount * plays.length, createdAt, photo?.data ?? null, photo?.contentType ?? null]
+      [id, clubId, userId, input.lottery, input.drawingDate, input.drawingCount, JSON.stringify(numberSets), contributionCost(input.lottery, price, input.drawingCount, plays), createdAt, photo?.data ?? null, photo?.contentType ?? null]
     );
     return this.toContribution(rows[0]);
   }
@@ -715,7 +790,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     const price = Number(snapshot?.ticketPrice);
     const rules = snapshot?.numberRules;
     const plays = input.numberSets ?? [{ numbers: input.numbers!, bonusNumber: input.bonusNumber! }];
-    if (!Number.isFinite(price) || price <= 0 || !plays.length || plays.length > getMaxNumberSets(input.lottery) || plays.some((play) => !this.validNumberSet(play, rules))) {
+    if (!Number.isFinite(price) || price <= 0 || !plays.length || plays.length > getMaxNumberSets(input.lottery) || plays.some((play) => !this.validNumberSet(play, rules) || !hasValidPlayOptions(input.lottery, play))) {
       throw new ClubApiError(400, "The ticket does not match the saved official game rules.", "invalid_number_set");
     }
 
@@ -725,6 +800,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       contributionId,
       numbers: play.numbers,
       bonusNumber: String(play.bonusNumber),
+      ...storedPlayOptions(play),
       createdAt: now,
     }));
     const { rows } = await this.client.query(
@@ -760,7 +836,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
        )
        SELECT u.*, EXISTS (SELECT 1 FROM contribution_photos p WHERE p.contribution_id = u.id) AS has_ticket_photo
        FROM updated u JOIN audit a ON a.entity_id = u.id`,
-      [userId, contributionId, clubId, input.lottery, input.drawingDate, input.drawingCount, JSON.stringify(numberSets), price * input.drawingCount * plays.length, now, Number(current.version), affectedDrawingIds]
+      [userId, contributionId, clubId, input.lottery, input.drawingDate, input.drawingCount, JSON.stringify(numberSets), contributionCost(input.lottery, price, input.drawingCount, plays), now, Number(current.version), affectedDrawingIds]
     );
     if (!rows[0]) throw new ClubApiError(409, "The ticket changed or is no longer editable.", "contribution_not_editable");
     return { contribution: this.toContribution(rows[0]), recalculationTargets };
@@ -816,6 +892,19 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       createdAt: this.toIso(row.created_at),
       updatedAt: this.toIso(row.updated_at),
       closedAt: row.closed_at ? this.toIso(row.closed_at) : null,
+    };
+  }
+
+  private toNotificationPreference(row: Record<string, any>): NotificationPreference {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      inAppEnabled: row.in_app_enabled,
+      emailEnabled: row.email_enabled,
+      pushEnabled: row.push_enabled,
+      smsEnabled: row.sms_enabled,
+      phoneVerified: row.phone_verified,
+      updatedAt: this.toIso(row.updated_at),
     };
   }
 

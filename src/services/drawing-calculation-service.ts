@@ -8,6 +8,7 @@ import type {
   Drawing,
   DrawingResult,
   LotteryType,
+  NotificationDraft,
   PayoutConfiguration,
   PrizeAward,
   ThresholdRule,
@@ -41,6 +42,7 @@ export interface DrawingCalculationRepository {
   findDrawingById(drawingId: string): Promise<Drawing | null>;
   findDrawingsByLottery(lottery: LotteryType): Promise<Drawing[]>;
   findDrawingResultByDrawingAndClub(drawingId: string, clubId: string): Promise<DrawingResult | null>;
+  findPrizeAwardsForResult(resultId: string): Promise<PrizeAward[]>;
   findCalculationSnapshotById(snapshotId: string): Promise<CalculationSnapshot | null>;
   findMembershipsByClub(clubId: string): Promise<ClubMembership[]>;
   findContributionsForClub(clubId: string): Promise<Contribution[]>;
@@ -50,7 +52,8 @@ export interface DrawingCalculationRepository {
     resultId: string,
     awards: PrizeAward[],
     status: "calculated" | "recalculated",
-    calculatedAt: string
+    calculatedAt: string,
+    notifications?: NotificationDraft[]
   ): Promise<PrizeAward[]>;
 }
 
@@ -107,6 +110,7 @@ export class DrawingCalculationService {
     if (result.status === "pending") {
       throw new Error("Drawing results must be posted before calculation.");
     }
+    const previousAwards = await this.repository.findPrizeAwardsForResult(result.id);
     if (!result.sourceSnapshotId) {
       throw new Error("A calculation rules snapshot is required.");
     }
@@ -191,11 +195,27 @@ export class DrawingCalculationService {
         updatedAt: now,
       }));
 
+    const notificationDrafts = this.createNotificationDrafts({
+      club,
+      drawing,
+      previousAwards,
+      awards,
+      eligibleMemberIds,
+      drawingContributionIds,
+      contributions: clubContributions,
+      grossByUser,
+      shareByUser: new Map(payout.allocations.map((allocation) => [allocation.userId, allocation.amount])),
+      payoutType: payoutConfiguration.type,
+      totalPrize: payout.totalPrize,
+      thresholdMet: payout.thresholdMet,
+      recalculation: isRecalculation,
+    });
     const persistedAwards = await this.repository.replacePrizeAwardsAndCompleteResult(
       result.id,
       awards,
       resultStatus,
-      now
+      now,
+      notificationDrafts
     );
 
     return {
@@ -204,5 +224,102 @@ export class DrawingCalculationService {
       eligibleMemberIds,
       totalPrize: payout.totalPrize,
     };
+  }
+
+  private createNotificationDrafts({
+    club,
+    drawing,
+    previousAwards,
+    awards,
+    eligibleMemberIds,
+    drawingContributionIds,
+    contributions,
+    grossByUser,
+    shareByUser,
+    payoutType,
+    totalPrize,
+    thresholdMet,
+    recalculation,
+  }: {
+    club: Club;
+    drawing: Drawing;
+    previousAwards: PrizeAward[];
+    awards: PrizeAward[];
+    eligibleMemberIds: string[];
+    drawingContributionIds: string[];
+    contributions: Contribution[];
+    grossByUser: Map<string, number>;
+    shareByUser: Map<string, number>;
+    payoutType: PayoutConfiguration["type"];
+    totalPrize: number;
+    thresholdMet: boolean;
+    recalculation: boolean;
+  }): NotificationDraft[] {
+    const context = `${drawing.lottery === "powerball" ? "Powerball" : "Mega Millions"} drawing on ${drawing.drawingDate}`;
+    if (!recalculation) {
+      if (totalPrize <= 0) return [];
+      const eligibleSet = new Set(eligibleMemberIds);
+      const drawingEntries = new Set(drawingContributionIds);
+      const recipients = !thresholdMet
+        ? [...grossByUser.keys()]
+        : payoutType === "proportion_drawing_specific"
+          ? contributions.filter((contribution) => drawingEntries.has(contribution.id) && eligibleSet.has(contribution.userId)).map((contribution) => contribution.userId)
+          : eligibleMemberIds;
+      return [...new Set(recipients)].map((userId) => ({
+        userId,
+        clubId: club.id,
+        drawingId: drawing.id,
+        type: "payout_calculated",
+        message: `${club.name}: ${context} is calculated. Gross prize: ${this.formatMoney(grossByUser.get(userId) ?? 0)}; your recorded share: ${this.formatMoney(shareByUser.get(userId) ?? 0)}.`,
+      }));
+    }
+
+    const previousByUser = this.sumAwardsByUser(previousAwards);
+    const currentByUser = this.sumAwardsByUser(awards);
+    const userIds = new Set([...previousByUser.keys(), ...currentByUser.keys()]);
+    const notifications: NotificationDraft[] = [];
+    for (const userId of userIds) {
+      const previous = previousByUser.get(userId);
+      const current = currentByUser.get(userId);
+      let recalculationType: string;
+      let message: string;
+      if (!previous && current) {
+        recalculationType = "win_added";
+        message = `${club.name}: a recalculation added a payout for the ${context}. Your recorded share is ${this.formatMoney(current.share)}.`;
+      } else if (previous && !current) {
+        recalculationType = "win_removed";
+        message = `${club.name}: a recalculation removed your recorded payout for the ${context}. The previous share was ${this.formatMoney(previous.share)}.`;
+      } else if (previous && current && (previous.gross !== current.gross || previous.share !== current.share)) {
+        recalculationType = "win_updated";
+        message = `${club.name}: a recalculation changed your payout for the ${context}. Your new recorded share is ${this.formatMoney(current.share)}.`;
+      } else {
+        continue;
+      }
+      notifications.push({
+        userId,
+        clubId: club.id,
+        drawingId: drawing.id,
+        type: "payout_recalculated",
+        recalculationType,
+        message,
+      });
+    }
+    return notifications;
+  }
+
+  private sumAwardsByUser(awards: PrizeAward[]): Map<string, { gross: number; share: number }> {
+    const totals = new Map<string, { gross: number; share: number }>();
+    for (const award of awards) {
+      if (!award.userId) continue;
+      const total = totals.get(award.userId) ?? { gross: 0, share: 0 };
+      total.gross += award.grossPrizeAmount;
+      total.share += award.shareAmount;
+      totals.set(award.userId, total);
+    }
+    return totals;
+  }
+
+  private formatMoney(amount: number): string {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
   }
 }

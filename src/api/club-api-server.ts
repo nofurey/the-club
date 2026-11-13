@@ -4,15 +4,20 @@ import Fastify, { type FastifyInstance, type preHandlerHookHandler } from "fasti
 import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
 
-import type { Contribution, Drawing, LotteryType, User } from "../domain";
-import type { ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UserClubSummary } from "./contracts";
+import type { Contribution, Drawing, LotteryType, Notification, NotificationPreference, User } from "../domain";
+import type { ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UpdateNotificationPreferencesRequest, UserClubSummary } from "./contracts";
 import { LotteryTypeSchema } from "../validators";
 import { ClubApiError } from "./errors";
 import { OidcEmailVerificationRequiredError, type OidcIdentity, type OidcTokenVerifier } from "./oidc-auth";
 import { getMaxNumberSets, isAllowedDrawingCount } from "../services/drawing-schedule";
+import { hasValidPlayOptions } from "../services/ticket-options";
 
 export interface ClubApiRepository {
   provisionOidcUser(identity: OidcIdentity): Promise<User>;
+  listNotifications(userId: string): Promise<Notification[]>;
+  getNotificationPreferences(userId: string): Promise<NotificationPreference>;
+  updateNotificationPreferences(userId: string, input: UpdateNotificationPreferencesRequest): Promise<NotificationPreference>;
+  markNotificationRead(userId: string, notificationId: string): Promise<boolean>;
   closeAccount(userId: string): Promise<void>;
   listUserClubs(userId: string): Promise<UserClubSummary[]>;
   searchClubs(userId: string, query: string): Promise<ClubDiscoverySummary[]>;
@@ -59,6 +64,8 @@ const clubParamsSchema = z.object({ clubId: z.string().uuid() });
 const clubMemberParamsSchema = z.object({ clubId: z.string().uuid(), userId: z.string().uuid() });
 const discoveryQuerySchema = z.object({ q: z.string().trim().min(2).max(80) }).strict();
 const membershipRoleSchema = z.object({ role: z.enum(["admin", "member"]) }).strict();
+const notificationPreferencesSchema = z.object({ inAppEnabled: z.boolean(), emailEnabled: z.boolean() }).strict();
+const notificationParamsSchema = z.object({ notificationId: z.string().uuid() });
 const ownershipTransferSchema = z.object({ newOwnerUserId: z.string().uuid() }).strict();
 const updateClubSettingsSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -85,6 +92,9 @@ const contributionFields = {
 const numberSetSchema = z.object({
   numbers: z.array(z.number().int()).length(5),
   bonusNumber: z.number().int().min(1),
+  powerPlay: z.boolean().optional(),
+  doublePlay: z.boolean().optional(),
+  megaplier: z.number().int().optional(),
 }).strict().refine((input) => new Set(input.numbers).size === input.numbers.length, {
   message: "Main numbers must be unique.",
 });
@@ -93,6 +103,8 @@ const createContributionSchema = z.union([
   z.object({ ...contributionFields, numberSets: z.array(numberSetSchema).min(1).max(getMaxNumberSets("powerball")) }).strict(),
 ]).refine((input) => isAllowedDrawingCount(input.lottery, input.drawingCount), {
   message: "The selected number of drawings is not available for this lottery.",
+}).refine((input) => ("numberSets" in input ? input.numberSets : [{}]).every((play) => hasValidPlayOptions(input.lottery, play)), {
+  message: "Each play must use only the add-ons its lottery offers; Mega Millions plays require a multiplier.",
 });
 
 function missingOfficialDataByLottery(drawings: Drawing[], options: TicketDrawingOption[]): Drawing[] {
@@ -169,6 +181,29 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
   server.get("/api/v1/me", { preHandler: authenticate }, async (request) => ({
     user: request.authenticatedUser,
   }));
+
+  server.get("/api/v1/me/notifications", { preHandler: authenticate }, async (request) => ({
+    notifications: await repository.listNotifications(request.authenticatedUser!.id),
+  }));
+
+  server.get("/api/v1/me/notification-preferences", { preHandler: authenticate }, async (request) => ({
+    preferences: await repository.getNotificationPreferences(request.authenticatedUser!.id),
+  }));
+
+  server.patch<{ Body: unknown }>("/api/v1/me/notification-preferences", { preHandler: authenticate }, async (request) => {
+    const body = notificationPreferencesSchema.safeParse(request.body);
+    if (!body.success) throw new ClubApiError(400, "Notification preferences are invalid.", "invalid_notification_preferences");
+    return { preferences: await repository.updateNotificationPreferences(request.authenticatedUser!.id, body.data) };
+  });
+
+  server.post<{ Params: { notificationId: string } }>("/api/v1/me/notifications/:notificationId/read", { preHandler: authenticate }, async (request, reply) => {
+    const params = notificationParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "A valid notification ID is required.", "invalid_notification_id");
+    if (!await repository.markNotificationRead(request.authenticatedUser!.id, params.data.notificationId)) {
+      throw new ClubApiError(404, "Notification was not found.", "notification_not_found");
+    }
+    return reply.code(204).send();
+  });
 
   server.get("/api/v1/me/clubs", { preHandler: authenticate }, async (request) => ({
     clubs: await repository.listUserClubs(request.authenticatedUser!.id),

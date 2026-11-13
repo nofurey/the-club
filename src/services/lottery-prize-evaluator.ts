@@ -9,6 +9,7 @@ import type {
   DrawingPrizeEvaluator,
   EvaluatedPrize,
 } from "./drawing-calculation-service";
+import { isMegaplierValue, POWERBALL_PRIZE_TIERS } from "./ticket-options";
 
 export interface SnapshotNumberRules {
   mainNumberCount: number;
@@ -38,6 +39,9 @@ export class SnapshotLotteryPrizeEvaluator implements DrawingPrizeEvaluator {
   validateOfficialNumbers(winningNumbers: Record<string, unknown>, priceSnapshot: Record<string, unknown>): void {
     const rules = this.parsePrizeRules(priceSnapshot);
     this.parseNumberSet(winningNumbers, rules.numberRules, "Official winning numbers");
+    if (winningNumbers.doublePlay != null) {
+      this.parseNumberSet(winningNumbers.doublePlay, rules.numberRules, "Official Double Play numbers");
+    }
   }
 
   async evaluate({ drawing, drawings, result, snapshot, contributions }: {
@@ -80,28 +84,54 @@ export class SnapshotLotteryPrizeEvaluator implements DrawingPrizeEvaluator {
     });
 
     const wins: EvaluatedPrize[] = [];
+    const jackpotWins: EvaluatedPrize[] = [];
+    const doublePlayNumbers = drawing.lottery === "powerball" && result.officialWinningNumbers?.doublePlay != null
+      ? this.parseNumberSet(result.officialWinningNumbers.doublePlay, rules.numberRules, "Official Double Play numbers")
+      : null;
     for (const contribution of drawingContributions) {
       for (const rawNumberSet of contribution.numberSets) {
         const numberSet = this.parseNumberSet(rawNumberSet, rules.numberRules, "Ticket number set");
-        const mainMatches = numberSet.numbers.reduce(
-          (count, number) => count + (winningNumbers.numbers.includes(number) ? 1 : 0),
-          0
-        );
-        const bonusMatches = numberSet.bonusNumber === winningNumbers.bonusNumber;
-        const tier = rules.prizeTiers.find(
-          (candidate) => candidate.mainMatches === mainMatches && candidate.bonusMatches === bonusMatches
-        );
+        const options = this.readPlayOptions(rawNumberSet, drawing.lottery);
+        const tier = this.findTier(rules.prizeTiers, numberSet, winningNumbers);
 
-        if (!tier) {
-          continue;
+        if (tier) {
+          const win = { contributionId: contribution.id, userId: contribution.userId, prizeType: tier.prizeType, amount: 0 };
+          if (tier.prizeAmount === "jackpot_estimate") {
+            jackpotWins.push(win);
+            wins.push(win);
+          } else {
+            const optionKey = this.optionPrizeKey(tier, options, drawing.lottery);
+            win.prizeType = optionKey ?? tier.prizeType;
+            win.amount = optionKey ? this.readBreakdownAmount(result, optionKey) : this.resolvePrizeAmount(tier, result);
+            wins.push(win);
+          }
         }
 
-        wins.push({
-          contributionId: contribution.id,
-          userId: contribution.userId,
-          prizeType: tier.prizeType,
-          amount: this.resolvePrizeAmount(tier, result),
-        });
+        if (options.doublePlay) {
+          if (!doublePlayNumbers) {
+            throw new Error("Official result is missing the Double Play numbers.");
+          }
+          const dpTier = POWERBALL_PRIZE_TIERS.find(([mainMatches, bonusMatches]) =>
+            mainMatches === this.countMainMatches(numberSet, doublePlayNumbers) &&
+            bonusMatches === (numberSet.bonusNumber === doublePlayNumbers.bonusNumber));
+          if (dpTier) {
+            const prizeType = `double_play_match_${dpTier[0]}_bonus_${dpTier[1]}`;
+            wins.push({ contributionId: contribution.id, userId: contribution.userId, prizeType, amount: this.readBreakdownAmount(result, prizeType) });
+          }
+        }
+      }
+    }
+
+    if (jackpotWins.length > 0) {
+      const estimate = this.resolvePrizeAmount({ mainMatches: 5, bonusMatches: true, prizeType: "jackpot", prizeAmount: "jackpot_estimate" }, result);
+      const officialWinners = result.prizeBreakdown?.jackpot_winners;
+      if (!Number.isInteger(officialWinners) || (officialWinners as number) < jackpotWins.length) {
+        throw new Error("The official jackpot winner count is missing or lower than the club's winning plays; the jackpot cannot be split safely.");
+      }
+      // Equal split among all official jackpot winners, rounded down to the cent.
+      const share = Math.floor((estimate * 100) / (officialWinners as number)) / 100;
+      for (const win of jackpotWins) {
+        win.amount = share;
       }
     }
 
@@ -109,6 +139,50 @@ export class SnapshotLotteryPrizeEvaluator implements DrawingPrizeEvaluator {
       drawingContributionIds: drawingContributions.map((contribution) => contribution.id),
       wins,
     };
+  }
+
+  private findTier(tiers: SnapshotPrizeTier[], numberSet: { numbers: number[]; bonusNumber: number }, winning: { numbers: number[]; bonusNumber: number }): SnapshotPrizeTier | undefined {
+    const mainMatches = this.countMainMatches(numberSet, winning);
+    const bonusMatches = numberSet.bonusNumber === winning.bonusNumber;
+    return tiers.find((candidate) => candidate.mainMatches === mainMatches && candidate.bonusMatches === bonusMatches);
+  }
+
+  private countMainMatches(numberSet: { numbers: number[] }, winning: { numbers: number[] }): number {
+    return numberSet.numbers.reduce((count, number) => count + (winning.numbers.includes(number) ? 1 : 0), 0);
+  }
+
+  private readPlayOptions(rawNumberSet: unknown, lottery: Drawing["lottery"]): { powerPlay: boolean; doublePlay: boolean; megaplier: number | null } {
+    const raw = this.isRecord(rawNumberSet) ? rawNumberSet : {};
+    const megaplier = raw.megaplier == null ? null : raw.megaplier;
+    if (megaplier !== null && !isMegaplierValue(megaplier)) {
+      throw new Error("Ticket number set has an invalid Mega Millions multiplier.");
+    }
+    if ((lottery === "powerball" && megaplier !== null) || (lottery === "mega_millions" && (raw.powerPlay === true || raw.doublePlay === true))) {
+      throw new Error("Ticket number set has add-ons that its lottery does not offer.");
+    }
+    return { powerPlay: raw.powerPlay === true, doublePlay: raw.doublePlay === true, megaplier };
+  }
+
+  // Returns the breakdown key for plays whose prize depends on a multiplier add-on.
+  private optionPrizeKey(tier: SnapshotPrizeTier, options: { powerPlay: boolean; megaplier: number | null }, lottery: Drawing["lottery"]): string | null {
+    if (typeof tier.prizeAmount === "number") {
+      return null;
+    }
+    if (lottery === "mega_millions") {
+      if (options.megaplier === null) {
+        throw new Error("A winning Mega Millions play is missing its recorded multiplier.");
+      }
+      return `${tier.prizeType}_x${options.megaplier}`;
+    }
+    return options.powerPlay ? `${tier.prizeType}_power_play` : null;
+  }
+
+  private readBreakdownAmount(result: DrawingResult, key: string): number {
+    const amount = this.readNumber(result.prizeBreakdown?.[key], `Prize amount for ${key}`);
+    if (amount <= 0) {
+      throw new Error(`Prize amount for ${key} must be greater than zero.`);
+    }
+    return amount;
   }
 
   private parsePrizeRules(snapshot: Record<string, unknown>): SnapshotPrizeRules {
