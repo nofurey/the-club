@@ -58,6 +58,7 @@ export interface CalculateDrawingInput {
   drawingId: string;
   clubId: string;
   cutoffAt: string;
+  recalculation?: boolean;
 }
 
 export interface CalculateDrawingResult {
@@ -74,21 +75,19 @@ export class DrawingCalculationService {
     private readonly payoutService = new PayoutService()
   ) {}
 
-  async calculateDrawing({ drawingId, clubId, cutoffAt }: CalculateDrawingInput): Promise<CalculateDrawingResult> {
+  async calculateDrawing({ drawingId, clubId, cutoffAt, recalculation = false }: CalculateDrawingInput): Promise<CalculateDrawingResult> {
     const cutoffTime = Date.parse(cutoffAt);
     if (!Number.isFinite(cutoffTime)) {
       throw new Error("A valid drawing cutoff timestamp is required.");
     }
 
-    const [club, drawing, result, memberships, contributions, payoutConfiguration, thresholdRule] = await Promise.all([
-      this.repository.findClubById(clubId),
-      this.repository.findDrawingById(drawingId),
-      this.repository.findDrawingResultByDrawingAndClub(drawingId, clubId),
-      this.repository.findMembershipsByClub(clubId),
-      this.repository.findContributionsForClub(clubId),
-      this.repository.findPayoutConfigurationByClub(clubId),
-      this.repository.findThresholdRuleByClub(clubId),
-    ]);
+    const club = await this.repository.findClubById(clubId);
+    const drawing = await this.repository.findDrawingById(drawingId);
+    const result = await this.repository.findDrawingResultByDrawingAndClub(drawingId, clubId);
+    const memberships = await this.repository.findMembershipsByClub(clubId);
+    const contributions = await this.repository.findContributionsForClub(clubId);
+    const payoutConfiguration = await this.repository.findPayoutConfigurationByClub(clubId);
+    const thresholdRule = await this.repository.findThresholdRuleByClub(clubId);
 
     if (!club) {
       throw new Error("Club not found.");
@@ -172,7 +171,7 @@ export class DrawingCalculationService {
     }
 
     const now = new Date().toISOString();
-    const isRecalculation = result.status === "calculated" || result.status === "recalculated";
+    const isRecalculation = recalculation || result.status === "calculated" || result.status === "recalculated";
     const resultStatus = isRecalculation ? "recalculated" : "calculated";
     const awards = payout.allocations
       .filter((allocation) => allocation.amount > 0 || (grossByUser.get(allocation.userId) ?? 0) > 0)

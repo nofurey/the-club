@@ -19,6 +19,7 @@ export type QueryResultLike = {
 
 export type DbLikeClient = {
   query: (text: string, params?: any[]) => Promise<QueryResultLike>;
+  transaction?: <T>(operation: (client: DbLikeClient) => Promise<T>) => Promise<T>;
 };
 
 export class PostgresClubRepository implements ClubRepository {
@@ -214,6 +215,7 @@ export class PostgresClubRepository implements ClubRepository {
     rulesChanged: boolean;
     resultChanged: boolean;
     drawingSizeUpdated: boolean;
+    recalculationRequired?: boolean;
   }> {
     await this.client.query("BEGIN");
     try {
@@ -285,6 +287,10 @@ export class PostgresClubRepository implements ClubRepository {
         storedSnapshot = PostgresClubRepository.toCalculationSnapshot(rows[0]);
       }
 
+      const recalculationRequired = Boolean(
+        previousResult && (rulesChanged || resultChanged) &&
+        (previousResult.status === "calculated" || previousResult.status === "recalculated")
+      );
       const invalidated = Boolean(previousResult && (rulesChanged || resultChanged));
       const nextStatus = invalidated
         ? result.officialWinningNumbers ? "results_posted" : "pending"
@@ -420,7 +426,7 @@ export class PostgresClubRepository implements ClubRepository {
       }
 
       await this.client.query("COMMIT");
-      return { snapshot: storedSnapshot, result: storedResult, rulesChanged, resultChanged, drawingSizeUpdated };
+      return { snapshot: storedSnapshot, result: storedResult, rulesChanged, resultChanged, drawingSizeUpdated, recalculationRequired };
     } catch (error) {
       await this.client.query("ROLLBACK");
       throw error;
@@ -558,11 +564,51 @@ export class PostgresClubRepository implements ClubRepository {
           WHERE user_id = $1
             AND club_id = $2
             AND drawing_date > CURRENT_DATE
+            AND status IN ('submitted', 'calculated', 'recalculated')
         ) AS exists
       `,
       [userId, clubId]
     );
 
+    return Boolean(rows[0]?.exists);
+  }
+
+  async hasPendingPayoutForUserInClub(userId: string, clubId: string): Promise<boolean> {
+    const { rows } = await this.client.query(
+      "SELECT EXISTS (SELECT 1 FROM prize_awards WHERE user_id = $1 AND club_id = $2 AND status = 'pending') AS exists",
+      [userId, clubId]
+    );
+    return Boolean(rows[0]?.exists);
+  }
+
+  async hasCutoffCalculationInProgress(clubId: string): Promise<boolean> {
+    const { rows } = await this.client.query(
+      `
+        SELECT EXISTS (
+          SELECT 1
+          FROM drawings d
+          LEFT JOIN drawing_results r ON r.drawing_id = d.id AND r.club_id = $1
+          WHERE ((d.drawing_date + d.cutoff_time_et) AT TIME ZONE 'America/New_York') < NOW()
+            AND (r.status IS NULL OR r.status NOT IN ('calculated', 'recalculated'))
+            AND EXISTS (
+              SELECT 1
+              FROM contributions c
+              WHERE c.club_id = $1
+                AND c.lottery = d.lottery
+                AND c.status IN ('submitted', 'calculated', 'recalculated')
+                AND c.drawing_date <= d.drawing_date
+                AND (
+                  SELECT COUNT(*)
+                  FROM drawings covered
+                  WHERE covered.lottery = c.lottery
+                    AND covered.drawing_date >= c.drawing_date
+                    AND covered.drawing_date <= d.drawing_date
+                ) <= c.drawing_count
+            )
+        ) AS exists
+      `,
+      [clubId]
+    );
     return Boolean(rows[0]?.exists);
   }
 
@@ -710,7 +756,7 @@ export class PostgresClubRepository implements ClubRepository {
       clubId: row.club_id,
       userId: row.user_id,
       lottery: row.lottery,
-      drawingDate: row.drawing_date,
+      drawingDate: PostgresClubRepository.toDateOnly(row.drawing_date),
       drawingCount: Number(row.drawing_count),
       numberSets: Array.isArray(row.number_sets) ? row.number_sets : [],
       ticketImageUrl: row.ticket_image_url ?? null,
@@ -726,9 +772,7 @@ export class PostgresClubRepository implements ClubRepository {
     return {
       id: row.id,
       lottery: row.lottery,
-      drawingDate: row.drawing_date instanceof Date
-        ? row.drawing_date.toISOString().slice(0, 10)
-        : String(row.drawing_date).slice(0, 10),
+      drawingDate: PostgresClubRepository.toDateOnly(row.drawing_date),
       state: row.state,
       cutoffTimeEt: row.cutoff_time_et,
       officialResultPostedAt: row.official_result_posted_at
@@ -818,6 +862,10 @@ export class PostgresClubRepository implements ClubRepository {
 
   private static toIsoString(value: string | Date): string {
     return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+  }
+
+  private static toDateOnly(value: string | Date): string {
+    return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
   }
 
   private static sameRules(left: CalculationSnapshot, right: CalculationSnapshot): boolean {

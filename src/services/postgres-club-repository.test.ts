@@ -283,6 +283,10 @@ test("requestMembership and approveMembership work for private clubs", async () 
 
   assert.equal(approved.status, "active");
   assert.equal(approved.role, "member");
+  await assert.rejects(
+    () => service.rejectMembership({ clubId: club.club.id, userId: memberId, actingUserId: ownerId }),
+    /not pending approval/i
+  );
 });
 
 test("leaveClub fails when a member has future contributions", async () => {

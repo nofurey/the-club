@@ -15,7 +15,7 @@ import type { DbLikeClient } from "../services/postgres-club-repository";
 import { ClubService } from "../services/club-service";
 import { PostgresClubRepository } from "../services/postgres-club-repository";
 import { getDrawingCountOptions, getMaxDrawings, getMaxNumberSets, getUpcomingDrawingDates, isAllowedDrawingCount } from "../services/drawing-schedule";
-import type { ClubOverview, ClubMemberView, CreateClubRequest, CreateContributionInput, DrawingResultView, TicketDrawingOption, TicketNumberSetInput, UpdateClubSettingsRequest, UserClubSummary } from "./contracts";
+import type { ClubDiscoverySummary, ClubOverview, ClubMemberView, CreateClubRequest, CreateContributionInput, DrawingPayoutView, DrawingResultView, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, TicketNumberSetInput, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UserClubSummary } from "./contracts";
 import { ClubApiError } from "./errors";
 import type { ClubApiRepository, TicketPhoto } from "./club-api-server";
 import type { OidcIdentity } from "./oidc-auth";
@@ -80,6 +80,178 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     return rows.map((row) => ({ id: row.id, name: row.name, visibility: row.visibility, role: row.role }));
   }
 
+  async closeAccount(userId: string): Promise<void> {
+    const { rows } = await this.client.query(
+      `UPDATE users
+       SET status = 'closed', closed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'active'
+         AND NOT EXISTS (
+           SELECT 1 FROM clubs WHERE owner_user_id = $1 AND status = 'active'
+         )
+       RETURNING id`,
+      [userId]
+    );
+    if (rows[0]) return;
+
+    const { rows: ownedClubs } = await this.client.query(
+      "SELECT id FROM clubs WHERE owner_user_id = $1 AND status = 'active' LIMIT 1",
+      [userId]
+    );
+    if (ownedClubs[0]) {
+      throw new ClubApiError(409, "Transfer ownership or close your active clubs before closing your account.", "account_owns_active_clubs");
+    }
+    throw new ClubApiError(409, "This account is already closed or unavailable.", "account_not_active");
+  }
+
+  async searchClubs(userId: string, query: string): Promise<ClubDiscoverySummary[]> {
+    const { rows } = await this.client.query(
+      `SELECT c.id, c.name, c.visibility, c.description, c.motto,
+              caller.status AS membership_status,
+              COUNT(active_members.id)::int AS member_count
+       FROM clubs c
+       LEFT JOIN club_memberships caller ON caller.club_id = c.id AND caller.user_id = $1
+       LEFT JOIN club_memberships active_members ON active_members.club_id = c.id AND active_members.status = 'active'
+       WHERE c.status = 'active'
+         AND (c.visibility = 'public' OR c.allow_search = true)
+         AND c.name ILIKE $2
+       GROUP BY c.id, caller.status
+       ORDER BY c.name
+       LIMIT 50`,
+      [userId, `%${query}%`]
+    );
+    return rows.map((row) => row.visibility === "private"
+      ? { id: row.id, name: row.name, visibility: "private", membershipStatus: row.membership_status ?? null }
+      : {
+          id: row.id,
+          name: row.name,
+          visibility: "public",
+          description: row.description ?? null,
+          motto: row.motto ?? null,
+          memberCount: Number(row.member_count),
+          membershipStatus: row.membership_status ?? null,
+        });
+  }
+
+  async requestMembership(userId: string, clubId: string): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).requestMembership({ clubId, userId })
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async listMembershipRequests(userId: string, clubId: string): Promise<MembershipRequestView[]> {
+    await this.assertModerator(userId, clubId);
+    const { rows } = await this.client.query(
+      `SELECT m.id AS membership_id, m.user_id, u.display_name, u.email, m.joined_at
+       FROM club_memberships m
+       JOIN users u ON u.id = m.user_id
+       WHERE m.club_id = $1 AND m.status = 'pending' AND u.status = 'active'
+       ORDER BY m.joined_at`,
+      [clubId]
+    );
+    return rows.map((row) => ({
+      membershipId: row.membership_id,
+      userId: row.user_id,
+      displayName: row.display_name,
+      email: row.email,
+      requestedAt: this.toIso(row.joined_at),
+    }));
+  }
+
+  async approveMembership(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).approveMembership({ clubId, userId: memberUserId, actingUserId: userId })
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async rejectMembership(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).rejectMembership({ clubId, userId: memberUserId, actingUserId: userId })
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async leaveClub(userId: string, clubId: string): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).leaveClub(clubId, userId)
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async removeMember(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).removeMember({ clubId, userId: memberUserId, actingUserId: userId })
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async updateMembershipRole(userId: string, clubId: string, memberUserId: string, role: "admin" | "member"): Promise<MembershipActionResult> {
+    await this.assertActiveClub(clubId);
+    const membership = await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).updateMembershipRole(clubId, memberUserId, userId, role)
+    );
+    return this.toMembershipActionResult(membership);
+  }
+
+  async closeClub(userId: string, clubId: string): Promise<void> {
+    await this.assertActiveClub(clubId);
+    await this.runMembershipOperation(() =>
+      new ClubService(new PostgresClubRepository(this.client)).closeClub({ clubId, actingUserId: userId })
+    );
+  }
+
+  async transferClubOwnership(userId: string, clubId: string, newOwnerUserId: string): Promise<void> {
+    await this.assertActiveClub(clubId);
+    if (!this.client.transaction) {
+      throw new ClubApiError(500, "Ownership transfer is unavailable without a transactional database connection.", "ownership_transfer_unavailable");
+    }
+    await this.runMembershipOperation(() => this.client.transaction!(async (transactionClient) =>
+      new ClubService(new PostgresClubRepository(transactionClient)).transferOwnership({
+        clubId,
+        currentOwnerUserId: userId,
+        newOwnerUserId,
+      })
+    ));
+  }
+
+  private async assertActiveClub(clubId: string): Promise<void> {
+    const { rows } = await this.client.query("SELECT id FROM clubs WHERE id = $1 AND status = 'active' LIMIT 1", [clubId]);
+    if (!rows[0]) throw new ClubApiError(404, "Club was not found.", "club_not_found");
+  }
+
+  private async assertModerator(userId: string, clubId: string): Promise<void> {
+    const { rows } = await this.client.query(
+      `SELECT m.role FROM club_memberships m JOIN clubs c ON c.id = m.club_id
+       WHERE m.club_id = $1 AND m.user_id = $2 AND m.status = 'active' AND c.status = 'active' LIMIT 1`,
+      [clubId, userId]
+    );
+    if (!rows[0]) throw new ClubApiError(404, "Club was not found or the user is not an active member.", "club_not_found");
+    if (rows[0].role !== "creator" && rows[0].role !== "admin") {
+      throw new ClubApiError(403, "Only creators and admins may review membership requests.", "membership_moderation_forbidden");
+    }
+  }
+
+  private async runMembershipOperation<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof ClubApiError) throw error;
+      const message = error instanceof Error ? error.message : "Membership action could not be completed.";
+      const status = /only .* may|not a member/i.test(message) ? 403 : /not found/i.test(message) ? 404 : 409;
+      throw new ClubApiError(status, message, "membership_action_conflict");
+    }
+  }
+
+  private toMembershipActionResult(membership: ClubMembership): MembershipActionResult {
+    return { membershipId: membership.id, userId: membership.userId, role: membership.role, status: membership.status };
+  }
+
   async updateClubSettings(userId: string, clubId: string, input: UpdateClubSettingsRequest): Promise<Club | null> {
     const { rows: memberships } = await this.client.query(
       `SELECT m.role FROM club_memberships m
@@ -138,6 +310,15 @@ export class PostgresClubApiRepository implements ClubApiRepository {
         `,
         [clubId]
       );
+      const prizePayoutRows = await this.client.query(
+        `SELECT pa.drawing_result_id, pa.user_id, u.display_name, pa.prize_type,
+                pa.gross_prize_amount, pa.share_amount, pa.threshold_met, pa.payout_type, pa.status
+         FROM prize_awards pa
+         LEFT JOIN users u ON u.id = pa.user_id
+         WHERE pa.club_id = $1
+         ORDER BY pa.created_at DESC, u.display_name`,
+        [clubId]
+      );
     const contributionRows = await this.client.query(
       `WITH ranked_drawings AS (
          SELECT id, lottery, drawing_date, cutoff_time_et,
@@ -147,14 +328,14 @@ export class PostgresClubApiRepository implements ClubApiRepository {
        SELECT c.*,
          EXISTS (SELECT 1 FROM contribution_photos p WHERE p.contribution_id = c.id) AS has_ticket_photo,
          COALESCE(c.user_id = $2 AND c.status = 'submitted' AND starts.sequence_number IS NOT NULL
-           AND ((starts.drawing_date + starts.cutoff_time_et) AT TIME ZONE 'America/New_York') > NOW()
            AND NOT EXISTS (
              SELECT 1 FROM drawing_results r
              JOIN ranked_drawings target ON target.id = r.drawing_id
              WHERE r.club_id = c.club_id AND target.lottery = c.lottery
                AND target.sequence_number >= starts.sequence_number
                AND target.sequence_number < starts.sequence_number + c.drawing_count
-               AND (r.status IN ('calculated', 'recalculated') OR r.official_winning_numbers IS NOT NULL AND r.official_winning_numbers <> 'null'::jsonb)
+               AND ((r.status IN ('calculated', 'recalculated') AND (r.official_winning_numbers IS NULL OR r.official_winning_numbers = 'null'::jsonb))
+                 OR ((r.official_winning_numbers IS NOT NULL AND r.official_winning_numbers <> 'null'::jsonb) AND r.source_snapshot_id IS NULL))
            ), false) AS can_edit
        FROM contributions c
        LEFT JOIN ranked_drawings starts ON starts.lottery = c.lottery AND starts.drawing_date = c.drawing_date
@@ -235,6 +416,21 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       ticketCount: Number(row.ticket_count),
     }));
     const contributions = contributionRows.rows.map((row) => this.toContribution(row));
+    const payoutsByResult = new Map<string, DrawingPayoutView[]>();
+    for (const row of prizePayoutRows.rows) {
+      const payouts = payoutsByResult.get(row.drawing_result_id) ?? [];
+      payouts.push({
+        userId: row.user_id,
+        memberName: row.display_name ?? "Member",
+        prizeType: row.prize_type,
+        grossPrizeAmount: Number(row.gross_prize_amount),
+        shareAmount: Number(row.share_amount),
+        thresholdMet: Boolean(row.threshold_met),
+        payoutType: row.payout_type ?? null,
+        status: row.status,
+      });
+      payoutsByResult.set(row.drawing_result_id, payouts);
+    }
     const results: DrawingResultView[] = resultRows.rows.map((row) => {
       const drawing = this.toDrawing(row);
       const result: DrawingResult | null = row.result_id ? {
@@ -255,6 +451,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
         result,
         winningTicketCount: Number(row.winning_ticket_count ?? 0),
         grossPrizeTotal: Number(row.gross_prize_total ?? 0),
+        payouts: row.result_id ? payoutsByResult.get(row.result_id) ?? [] : [],
       };
     });
 
@@ -447,13 +644,12 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     return this.toContribution(rows[0]);
   }
 
-  async updateContribution(userId: string, clubId: string, contributionId: string, input: CreateContributionInput): Promise<Contribution> {
+  async updateContribution(userId: string, clubId: string, contributionId: string, input: CreateContributionInput): Promise<UpdateContributionRepositoryResult> {
     if (!isAllowedDrawingCount(input.lottery, input.drawingCount)) {
       throw new ClubApiError(400, "The selected number of drawings is not available for this lottery.", "invalid_drawing_count");
     }
     const { rows: currentRows } = await this.client.query(
-      `SELECT c.*, ((d.drawing_date + d.cutoff_time_et) AT TIME ZONE 'America/New_York') > NOW() AS before_cutoff,
-              club.supported_lotteries::text[] AS supported_lotteries
+      `SELECT c.*, club.supported_lotteries::text[] AS supported_lotteries
        FROM contributions c
        JOIN clubs club ON club.id = c.club_id AND club.status = 'active'
        JOIN club_memberships m ON m.club_id = c.club_id AND m.user_id = $1 AND m.status = 'active'
@@ -464,8 +660,8 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     );
     const current = currentRows[0];
     if (!current) throw new ClubApiError(404, "Ticket was not found or is not owned by this member.", "contribution_not_found");
-    if (current.status !== "submitted" || current.before_cutoff !== true) {
-      throw new ClubApiError(409, "Tickets can only be edited before the first drawing cutoff.", "contribution_not_editable");
+    if (current.status !== "submitted") {
+      throw new ClubApiError(409, "Only submitted tickets can be edited.", "contribution_not_editable");
     }
     if (!current.supported_lotteries.includes(input.lottery)) {
       throw new ClubApiError(400, "This club does not support the selected lottery.", "unsupported_lottery");
@@ -488,11 +684,23 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     );
     const affectedDrawingIds = [...new Set([...targetIds, ...oldDrawings.map((drawing) => drawing.id)])];
     const { rows: existingResults } = await this.client.query(
-      "SELECT id FROM drawing_results WHERE club_id = $1 AND drawing_id = ANY($2::uuid[]) AND (status IN ('calculated', 'recalculated') OR official_winning_numbers IS NOT NULL AND official_winning_numbers <> 'null'::jsonb) LIMIT 1",
+      `SELECT r.id, r.drawing_id, r.status, r.official_winning_numbers, r.source_snapshot_id,
+              ((d.drawing_date + d.cutoff_time_et) AT TIME ZONE 'America/New_York') AS cutoff_at
+       FROM drawing_results r JOIN drawings d ON d.id = r.drawing_id
+       WHERE r.club_id = $1 AND r.drawing_id = ANY($2::uuid[])`,
       [clubId, affectedDrawingIds]
     );
-    if (existingResults.length) {
-      throw new ClubApiError(409, "Tickets with posted results require recalculation support before they can be edited.", "recalculation_required");
+    const recalculationTargets: RecalculationTarget[] = [];
+    for (const result of existingResults) {
+      const hasWinningNumbers = result.official_winning_numbers != null && result.official_winning_numbers !== "null";
+      const hasCalculation = result.status === "calculated" || result.status === "recalculated";
+      if (hasCalculation && !hasWinningNumbers) {
+        throw new ClubApiError(409, "A completed calculation is missing official numbers and cannot be safely recalculated.", "invalid_calculation_state");
+      }
+      if (hasWinningNumbers) {
+        if (!result.source_snapshot_id) throw new ClubApiError(409, "The posted result is missing its official rules snapshot.", "missing_calculation_snapshot");
+        recalculationTargets.push({ drawingId: result.drawing_id, cutoffAt: this.toIso(result.cutoff_at) });
+      }
     }
 
     const { rows: snapshots } = await this.client.query(
@@ -524,20 +732,6 @@ export class PostgresClubApiRepository implements ClubApiRepository {
          SELECT c.* FROM contributions c
          JOIN club_memberships m ON m.club_id = c.club_id AND m.user_id = $1 AND m.status = 'active'
          WHERE c.id = $2 AND c.club_id = $3 AND c.user_id = $1 AND c.status = 'submitted' AND c.version = $10
-           AND NOT EXISTS (
-             SELECT 1 FROM drawing_results r
-             WHERE r.club_id = $3 AND r.drawing_id = ANY($11::uuid[])
-               AND (r.status IN ('calculated', 'recalculated') OR r.official_winning_numbers IS NOT NULL AND r.official_winning_numbers <> 'null'::jsonb)
-           )
-           AND EXISTS (
-             SELECT 1 FROM drawings original
-             WHERE original.lottery = c.lottery AND original.drawing_date = c.drawing_date
-               AND ((original.drawing_date + original.cutoff_time_et) AT TIME ZONE 'America/New_York') > NOW()
-           )
-           AND EXISTS (
-             SELECT 1 FROM drawings d WHERE d.lottery = $4 AND d.drawing_date = $5::date
-               AND ((d.drawing_date + d.cutoff_time_et) AT TIME ZONE 'America/New_York') > NOW()
-           )
          FOR UPDATE OF c
        ), updated AS (
          UPDATE contributions c
@@ -553,13 +747,23 @@ export class PostgresClubApiRepository implements ClubApiRepository {
            jsonb_build_object('lottery', u.lottery, 'drawingDate', u.drawing_date, 'drawingCount', u.drawing_count, 'numberSets', u.number_sets, 'costUsd', u.cost_usd), $9
          FROM existing e JOIN updated u ON u.id = e.id
          RETURNING entity_id
+       ), invalidated_results AS (
+         UPDATE drawing_results r
+         SET status = 'results_posted', calculation_started_at = NULL, calculated_at = NULL
+         WHERE r.club_id = $3 AND r.drawing_id = ANY($11::uuid[])
+           AND r.official_winning_numbers IS NOT NULL AND r.official_winning_numbers <> 'null'::jsonb
+         RETURNING r.id
+       ), removed_awards AS (
+         DELETE FROM prize_awards a
+         WHERE a.drawing_result_id IN (SELECT id FROM invalidated_results)
+         RETURNING a.id
        )
        SELECT u.*, EXISTS (SELECT 1 FROM contribution_photos p WHERE p.contribution_id = u.id) AS has_ticket_photo
        FROM updated u JOIN audit a ON a.entity_id = u.id`,
       [userId, contributionId, clubId, input.lottery, input.drawingDate, input.drawingCount, JSON.stringify(numberSets), price * input.drawingCount * plays.length, now, Number(current.version), affectedDrawingIds]
     );
     if (!rows[0]) throw new ClubApiError(409, "The ticket changed or is no longer editable.", "contribution_not_editable");
-    return this.toContribution(rows[0]);
+    return { contribution: this.toContribution(rows[0]), recalculationTargets };
   }
 
   async getContributionPhoto(userId: string, clubId: string, contributionId: string): Promise<TicketPhoto | null> {

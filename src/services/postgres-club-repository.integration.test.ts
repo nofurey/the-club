@@ -11,6 +11,9 @@ import { PostgresClubRepository } from "./postgres-club-repository";
 import { PostgresOfficialDataRefreshTargetSource } from "./postgres-official-data-refresh-target-source";
 import { PostgresClubApiRepository } from "../api/postgres-club-api-repository";
 import { buildClubApiServer } from "../api/club-api-server";
+import type { OidcIdentity } from "../api/oidc-auth";
+import { DrawingCalculationService } from "./drawing-calculation-service";
+import { SnapshotLotteryPrizeEvaluator } from "./lottery-prize-evaluator";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const postgresTest = test;
@@ -50,9 +53,10 @@ postgresTest(
 
     const ownerId = randomUUID();
     const memberId = randomUUID();
+    const unaffiliatedId = randomUUID();
     await client.query(
-      "INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3), ($4, $5, $6)",
-      [ownerId, `${ownerId}@integration.test`, "Integration Owner", memberId, `${memberId}@integration.test`, "Integration Member"]
+      "INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9)",
+      [ownerId, `${ownerId}@integration.test`, "Integration Owner", memberId, `${memberId}@integration.test`, "Integration Member", unaffiliatedId, `${unaffiliatedId}@integration.test`, "Unaffiliated User"]
     );
 
     const repository = new PostgresClubRepository({
@@ -60,15 +64,43 @@ postgresTest(
     });
     const apiRepository = new PostgresClubApiRepository({
       query: (text: string, params: any[] = []) => client.query(text, params),
+      transaction: async (operation) => {
+        await client.query("BEGIN");
+        try {
+          const result = await operation({ query: (text: string, params: any[] = []) => client.query(text, params) });
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      },
     });
     const linkedOwner = await apiRepository.provisionOidcUser({
       subject: `oidc-${ownerId}`,
       email: `${ownerId}@integration.test`,
-      emailVerified: true,
+      emailVerified: true as const,
       displayName: "OIDC Integration Owner",
     });
     assert.equal(linkedOwner.id, ownerId);
     assert.equal(linkedOwner.authSubject, `oidc-${ownerId}`);
+    const newIdentity = {
+      subject: `oidc-signup-${randomUUID()}`,
+      email: `signup-${randomUUID()}@integration.test`,
+      emailVerified: true as const,
+      displayName: "Newly Registered Member",
+    };
+    const createdUser = await apiRepository.provisionOidcUser(newIdentity);
+    assert.equal(createdUser.authSubject, newIdentity.subject);
+    assert.equal(createdUser.email, newIdentity.email);
+    assert.equal(createdUser.status, "active");
+    const unverifiedIdentity = {
+      ...newIdentity,
+      subject: `unverified-${randomUUID()}`,
+      email: `unverified-${randomUUID()}@integration.test`,
+      emailVerified: false,
+    } as unknown as OidcIdentity;
+    await assert.rejects(apiRepository.provisionOidcUser(unverifiedIdentity), /verified OIDC identity/);
 
     const service = new ClubService(repository);
     const club = await service.createClub({
@@ -80,10 +112,65 @@ postgresTest(
       thresholdRule: { thresholdAmount: 100, method: "pooled" },
     });
     assert.deepEqual(club.club.supportedLotteries, ["powerball"]);
+    await assert.rejects(apiRepository.closeAccount(ownerId), /close your active clubs/i);
     const membership = await service.requestMembership({ clubId: club.club.id, userId: memberId });
     assert.equal(membership.status, "active");
     assert.deepEqual(await apiRepository.listUserClubs(ownerId), [{ id: club.club.id, name: club.club.name, visibility: "public", role: "creator" }]);
     assert.deepEqual(await apiRepository.listUserClubs(randomUUID()), []);
+
+    const searchableClub = await service.createClub({
+      name: "Searchable Private Club",
+      description: "This detail must stay private.",
+      motto: "Not in search results.",
+      visibility: "private",
+      allowSearch: true,
+      ownerUserId: ownerId,
+      supportedLotteries: ["powerball"],
+      payoutConfiguration: { type: "equal_shares" },
+      thresholdRule: { thresholdAmount: 100, method: "pooled" },
+    });
+    const joinRequest = await apiRepository.requestMembership(memberId, searchableClub.club.id);
+    assert.equal(joinRequest.status, "pending");
+    assert.deepEqual(await apiRepository.searchClubs(memberId, "Searchable"), [{
+      id: searchableClub.club.id,
+      name: searchableClub.club.name,
+      visibility: "private",
+      membershipStatus: "pending",
+    }]);
+    assert.equal((await apiRepository.listMembershipRequests(ownerId, searchableClub.club.id))[0].userId, memberId);
+    await assert.rejects(apiRepository.listMembershipRequests(memberId, searchableClub.club.id), /not an active member/);
+
+    assert.equal((await apiRepository.approveMembership(ownerId, searchableClub.club.id, memberId)).status, "active");
+    assert.equal((await apiRepository.updateMembershipRole(ownerId, searchableClub.club.id, memberId, "admin")).role, "admin");
+    await assert.rejects(apiRepository.removeMember(memberId, searchableClub.club.id, ownerId), /Only the creator/);
+
+    const guardedDrawingId = randomUUID();
+    const guardedContributionId = randomUUID();
+    await client.query(
+      "INSERT INTO drawings (id, lottery, drawing_date, state, cutoff_time_et, status) VALUES ($1, 'powerball', '2000-01-03', 'MI', '21:58:00', 'calculated')",
+      [guardedDrawingId]
+    );
+    await client.query(
+      `INSERT INTO contributions (id, club_id, user_id, lottery, drawing_date, drawing_count, number_sets, cost_usd, status)
+       VALUES ($1, $2, $3, 'powerball', '2000-01-03', 1, $4, 2, 'submitted')`,
+      [guardedContributionId, searchableClub.club.id, memberId, JSON.stringify([{ numbers: [1, 2, 3, 4, 5], bonusNumber: 6 }])]
+    );
+    await assert.rejects(apiRepository.removeMember(ownerId, searchableClub.club.id, memberId), /post-cutoff payout calculations/);
+
+    const drawingResultId = randomUUID();
+    await client.query(
+      "INSERT INTO drawing_results (id, drawing_id, club_id, status) VALUES ($1, $2, $3, 'calculated')",
+      [drawingResultId, guardedDrawingId, searchableClub.club.id]
+    );
+    const pendingAwardId = randomUUID();
+    await client.query(
+      "INSERT INTO prize_awards (id, drawing_result_id, user_id, club_id, prize_type, status) VALUES ($1, $2, $3, $4, 'drawing_payout', 'pending')",
+      [pendingAwardId, drawingResultId, memberId, searchableClub.club.id]
+    );
+    await assert.rejects(apiRepository.removeMember(ownerId, searchableClub.club.id, memberId), /pending payout/);
+    await client.query("UPDATE prize_awards SET status = 'allocated' WHERE id = $1", [pendingAwardId]);
+    assert.equal((await apiRepository.removeMember(ownerId, searchableClub.club.id, memberId)).status, "removed");
+
     const updatedClub = await apiRepository.updateClubSettings(ownerId, club.club.id, {
       name: "Updated Postgres Integration Club",
       description: "Updated description",
@@ -100,6 +187,13 @@ postgresTest(
       visibility: "public",
       allowSearch: true,
     }), /Only club creators and admins/);
+    await apiRepository.updateMembershipRole(ownerId, club.club.id, memberId, "admin");
+    await apiRepository.transferClubOwnership(ownerId, club.club.id, memberId);
+    const transferredRoles = await client.query(
+      "SELECT c.owner_user_id, creator.role AS new_creator_role, previous.role AS previous_owner_role FROM clubs c JOIN club_memberships creator ON creator.club_id = c.id AND creator.user_id = $2 JOIN club_memberships previous ON previous.club_id = c.id AND previous.user_id = $3 WHERE c.id = $1",
+      [club.club.id, memberId, ownerId]
+    );
+    assert.deepEqual(transferredRoles.rows[0], { owner_user_id: memberId, new_creator_role: "creator", previous_owner_role: "admin" });
 
     const drawingId = randomUUID();
     const nextDrawingId = randomUUID();
@@ -255,13 +349,15 @@ postgresTest(
     assert.deepEqual(await apiRepository.getContributionPhoto(memberId, club.club.id, apiContribution.id), photo);
     assert.equal(await apiRepository.getContributionPhoto(randomUUID(), club.club.id, apiContribution.id), null);
     assert.equal(await apiRepository.getContributionPhoto(memberId, randomUUID(), apiContribution.id), null);
-    await assert.rejects(apiRepository.updateContribution(ownerId, club.club.id, apiContribution.id, {
+    const lateTicketEdit = await apiRepository.updateContribution(ownerId, club.club.id, apiContribution.id, {
       lottery: "powerball",
       drawingDate: "2026-11-09",
       drawingCount: 1,
       numbers: [2, 4, 6, 8, 10],
       bonusNumber: 12,
-    }), /before the first drawing cutoff/);
+    });
+    assert.equal(lateTicketEdit.contribution.version, apiContribution.version + 1);
+    assert.deepEqual(lateTicketEdit.recalculationTargets.map((target) => target.drawingId), [drawingId]);
 
     const futureDrawing = activeSchedule?.find((drawing) => drawing.lottery === "powerball" && drawing.drawingDate > easternToday);
     assert.ok(futureDrawing);
@@ -271,6 +367,10 @@ postgresTest(
       drawingId: futureDrawing.id,
       capturedAt: new Date().toISOString(),
       sourceSha256: "f".repeat(64),
+      priceSnapshot: {
+        ...snapshot.priceSnapshot,
+        prizeTiers: [{ mainMatches: 5, bonusMatches: true, prizeType: "jackpot", prizeAmount: 1000000 }],
+      },
     };
     const futureResult: DrawingResult = {
       ...result,
@@ -302,9 +402,9 @@ postgresTest(
         { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 },
       ],
     });
-    assert.equal(editedContribution.version, editableContribution.version + 1);
-    assert.equal(editedContribution.costUsd, 4);
-    assert.equal(editedContribution.hasTicketPhoto, true);
+    assert.equal(editedContribution.contribution.version, editableContribution.version + 1);
+    assert.equal(editedContribution.contribution.costUsd, 4);
+    assert.equal(editedContribution.contribution.hasTicketPhoto, true);
     assert.deepEqual(await apiRepository.getContributionPhoto(memberId, club.club.id, editableContribution.id), photo);
     await assert.rejects(apiRepository.updateContribution(memberId, club.club.id, editableContribution.id, {
       lottery: "powerball",
@@ -321,6 +421,62 @@ postgresTest(
     assert.equal(auditRows[0].action, "updated");
     assert.equal(auditRows[0].old_value.numberSets.length, 1);
     assert.equal(auditRows[0].new_value.numberSets.length, 2);
+
+    const postedResult = {
+      ...futureResult,
+      officialWinningNumbers: { numbers: [2, 4, 6, 8, 10], bonusNumber: 12 },
+      jackpotEstimate: 1000000,
+      prizeBreakdown: { jackpot: 1000000 },
+      status: "results_posted" as const,
+    };
+    await repository.storeOfficialData(futureSnapshot, postedResult, now);
+    let recalculationError: string | null = null;
+    const editApi = await buildClubApiServer({
+      repository: apiRepository,
+      webOrigin: "https://club.example.test",
+      verifyToken: async (token) => ({
+        subject: token === "owner" ? `oidc-${ownerId}` : `oidc-${memberId}`,
+        email: token === "owner" ? `${ownerId}@integration.test` : `${memberId}@integration.test`,
+        emailVerified: true,
+        displayName: "Integration Member",
+      }),
+      recalculateDrawings: async (clubId, targets) => {
+        const calculator = new DrawingCalculationService(repository, new SnapshotLotteryPrizeEvaluator());
+        try {
+          for (const target of targets) await calculator.calculateDrawing({ ...target, clubId, recalculation: true });
+        } catch (error) {
+          recalculationError = error instanceof Error ? error.message : String(error);
+          throw error;
+        }
+      },
+    });
+    t.after(() => editApi.close());
+    const recalculatedEdit = await editApi.inject({
+      method: "PATCH",
+      url: `/api/v1/clubs/${club.club.id}/contributions/${editableContribution.id}`,
+      headers: { authorization: "Bearer owner" },
+      payload: {
+        lottery: "powerball",
+        drawingDate: futureDrawing.drawingDate,
+        drawingCount: 1,
+        numberSets: [
+          { numbers: [2, 4, 6, 8, 10], bonusNumber: 12 },
+          { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 },
+        ],
+      },
+    });
+    assert.equal(recalculatedEdit.statusCode, 200);
+    assert.equal(recalculatedEdit.json().recalculationPending, false, recalculationError ?? undefined);
+    assert.equal(recalculatedEdit.json().recalculatedDrawingCount, 1);
+    assert.equal((await repository.findDrawingResultByDrawingAndClub(futureDrawing.id, club.club.id))?.status, "recalculated");
+    const recalculatedOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
+    assert.equal(recalculatedOverview?.contributions.find((item) => item.id === editableContribution.id)?.canEdit, true);
+    assert.equal(recalculatedOverview?.results.find((item) => item.drawing.id === futureDrawing.id)?.payouts.some((payout) => payout.userId === ownerId && payout.grossPrizeAmount === 1000000), true);
+    const { rows: finalAuditRows } = await client.query(
+      "SELECT COUNT(*)::int AS count FROM audit_events WHERE entity_type = 'contribution' AND entity_id = $1",
+      [editableContribution.id]
+    );
+    assert.equal(finalAuditRows[0].count, 2);
 
     await assert.rejects(apiRepository.createContribution(ownerId, club.club.id, {
       lottery: "powerball",
@@ -356,6 +512,7 @@ postgresTest(
     assert.equal(overview?.contributions.length, 3);
     assert.equal(overview?.contributions.find((item) => item.id === apiContribution.id)?.hasTicketPhoto, true);
     assert.equal(overview?.totalContributionsUsd, 10);
+    assert.deepEqual(overview?.results.find((item) => item.drawing.id === drawingId)?.payouts.map((payout) => [payout.userId, payout.grossPrizeAmount, payout.shareAmount]), [[ownerId, 100, 100]]);
 
     const { rows } = await client.query("SELECT id, share_amount FROM prize_awards WHERE drawing_result_id = $1", [stored.result.id]);
     assert.equal(rows.length, 1);
@@ -424,5 +581,16 @@ postgresTest(
     const retrieved = await api.inject({ method: "GET", url: photoUrl, headers: { authorization: "Bearer owner" } });
     assert.equal(retrieved.statusCode, 200);
     assert.deepEqual(retrieved.rawPayload, image);
+
+    const blockedOwnerClosure = await api.inject({ method: "POST", url: "/api/v1/me/close", headers: { authorization: "Bearer owner" } });
+    assert.equal(blockedOwnerClosure.statusCode, 409);
+    const closedClub = await api.inject({ method: "POST", url: `/api/v1/clubs/${searchableClub.club.id}/close`, headers: { authorization: "Bearer owner" } });
+    assert.equal(closedClub.statusCode, 204);
+    const closedClubRow = await client.query("SELECT status FROM clubs WHERE id = $1", [searchableClub.club.id]);
+    assert.equal(closedClubRow.rows[0].status, "closed");
+    await apiRepository.closeAccount(unaffiliatedId);
+    const closedUser = await client.query("SELECT status, closed_at FROM users WHERE id = $1", [unaffiliatedId]);
+    assert.equal(closedUser.rows[0].status, "closed");
+    assert.ok(closedUser.rows[0].closed_at);
   }
 );

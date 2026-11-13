@@ -1,7 +1,7 @@
 import type { ClubMembership, Contribution, Drawing, DrawingResult, NumberSet } from "../../../src/domain";
 import type { CreateClubRequest } from "../../../src/api/contracts";
 import { getDrawingCountOptions } from "../../../src/services/drawing-schedule";
-import type { ClubApi, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView } from "./contracts";
+import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView } from "./contracts";
 
 const now = "2026-11-09T12:00:00.000Z";
 const clubId = "a1000000-0000-4000-8000-000000000001";
@@ -112,6 +112,16 @@ const results: DrawingResultView[] = drawings.map((drawing): DrawingResultView =
     result,
     winningTicketCount: drawing.id.endsWith("003") ? 1 : 0,
     grossPrizeTotal: drawing.id.endsWith("003") ? 100 : 0,
+    payouts: drawing.id.endsWith("003") ? [{
+      userId: ownerId,
+      memberName: "Alex Morgan",
+      prizeType: "drawing_payout",
+      grossPrizeAmount: 100,
+      shareAmount: 100,
+      thresholdMet: true,
+      payoutType: "equal_shares",
+      status: "allocated",
+    }] : [],
   };
 });
 
@@ -139,6 +149,10 @@ export const demoClubApi: ClubApi = {
   mode: "demo",
   async initialize() { return true; },
   async signIn() {},
+  async signUp() { throw new Error("Account creation requires the configured identity provider."); },
+  async signOut() {},
+  async closeAccount() { throw new Error("Account management requires an authenticated session."); },
+  async getCurrentUser() { return (await this.getOverview()).currentUser; },
   async getOverview() {
     const totalContributionsUsd = liveContributions.reduce((sum, contribution) => sum + contribution.costUsd, 0);
     const totalGrossPrizesUsd = results.reduce((sum, item) => sum + item.grossPrizeTotal, 0);
@@ -166,6 +180,17 @@ export const demoClubApi: ClubApi = {
   async getMyClubs() {
     return [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" as const }];
   },
+
+  async searchClubs(): Promise<ClubDiscoverySummary[]> { return []; },
+  async requestMembership(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async getMembershipRequests(): Promise<MembershipRequestView[]> { return []; },
+  async approveMembership(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async rejectMembership(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async leaveClub(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async removeMember(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async updateMembershipRole(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
+  async closeClub() { throw new Error("Club management requires an authenticated session."); },
+  async transferOwnership() { throw new Error("Club management requires an authenticated session."); },
 
   setActiveClubId() {},
 
@@ -234,7 +259,7 @@ export const demoClubApi: ClubApi = {
       version: existing.version + 1,
     };
     liveContributions = liveContributions.map((item) => item.id === contributionId ? updated : item);
-    return updated;
+    return { contribution: updated, recalculatedDrawingCount: 0, recalculationPending: false };
   },
 
   async getContributionPhoto(contributionId: string) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   ArrowDownRight,
@@ -28,22 +28,23 @@ import {
   X,
 } from "lucide-react";
 
-import type { Club, Contribution, LotteryType } from "../../src/domain";
+import type { Club, Contribution, LotteryType, User } from "../../src/domain";
 import { drawingResultState } from "../../src/api/drawing-result-state";
 import { emptyOcrModel, findPhotoExample, hasLearnableOcrRows, learnOcrCorrections, parseWithOcrModel, rememberPhotoExample } from "../../src/services/ticket-ocr-learning";
 import { clearOcrModel, loadOcrModel, saveOcrModel } from "../../src/services/ticket-ocr-learning-store";
 import { createClubApi } from "./api/club-api";
 import { demoClubApi } from "./api/demo-club-api";
-import type { ClubApi, ClubMemberView, ClubOverview, CreateClubRequest, CreateContributionInput, DrawingResultView, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./api/contracts";
+import type { ClubApi, ClubDiscoverySummary, ClubMemberView, ClubOverview, CreateClubRequest, CreateContributionInput, DrawingResultView, MembershipActionResult, MembershipRequestView, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./api/contracts";
 import type { TicketNumberSetInput } from "../../src/api/contracts";
 
-type View = "overview" | "contributions" | "results" | "members";
+type View = "overview" | "contributions" | "results" | "members" | "discovery";
 
 const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "contributions", label: "Contributions", icon: Ticket },
   { id: "results", label: "Drawing results", icon: Trophy },
   { id: "members", label: "Members", icon: Users },
+  { id: "discovery", label: "Discover clubs", icon: Search },
 ];
 
 const money = (amount: number) => new Intl.NumberFormat("en-US", {
@@ -69,6 +70,7 @@ const formatDate = (date: string, options: Intl.DateTimeFormatOptions = { month:
 
 const lotteryName = (lottery: LotteryType) => lottery === "powerball" ? "Powerball" : "Mega Millions";
 const bonusName = (lottery: LotteryType) => lottery === "powerball" ? "Powerball" : "Mega Ball";
+const userInitials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || "ME";
 
 function readerStorage(): Storage | null {
   try { return window.localStorage; } catch { return null; }
@@ -83,6 +85,7 @@ function App() {
   const [api, setApi] = useState<ClubApi>(() => createClubApi());
   const [view, setView] = useState<View>("overview");
   const [overview, setOverview] = useState<ClubOverview | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [clubs, setClubs] = useState<UserClubSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
@@ -92,6 +95,8 @@ function App() {
   const [editingContribution, setEditingContribution] = useState<Contribution | null>(null);
   const [createClubOpen, setCreateClubOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountClosed, setAccountClosed] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,10 +109,13 @@ function App() {
         if (!mounted) return;
         setAuthenticated(isAuthenticated);
         if (!isAuthenticated) return;
-        const [data, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
+        const [user, userClubs] = await Promise.all([api.getCurrentUser(), api.getMyClubs()]);
+        const data = userClubs.length ? await api.getOverview() : null;
         if (mounted) {
+          setCurrentUser(user);
           setOverview(data);
           setClubs(userClubs);
+          if (!data) setView("discovery");
         }
       })
       .catch((cause: unknown) => {
@@ -146,19 +154,24 @@ function App() {
       await addContribution(input, photo);
       return;
     }
-    await api.updateContribution(editingContribution.id, input);
+    const result = await api.updateContribution(editingContribution.id, input);
     const updated = await api.getOverview();
     setOverview(updated);
     setView("contributions");
     setDialogOpen(false);
     setEditingContribution(null);
-    setNotice("Ticket updated and audited.");
+    setNotice(result.recalculationPending
+      ? "Ticket updated and audited. Affected results are pending recalculation."
+      : result.recalculatedDrawingCount > 0
+        ? `Ticket updated and audited. ${result.recalculatedDrawingCount} drawing results recalculated.`
+        : "Ticket updated and audited.");
     window.setTimeout(() => setNotice(null), 3600);
   };
 
   const createClub = async (input: CreateClubRequest) => {
     const created = await api.createClub(input);
     setOverview(created);
+    setCurrentUser(created.currentUser);
     setClubs(await api.getMyClubs());
     setView("overview");
     setCreateClubOpen(false);
@@ -176,6 +189,7 @@ function App() {
     try {
       const [nextOverview, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
       setOverview(nextOverview);
+      setCurrentUser(nextOverview.currentUser);
       setClubs(userClubs);
       setView("overview");
     } catch (cause) {
@@ -195,12 +209,88 @@ function App() {
     window.setTimeout(() => setNotice(null), 3600);
   };
 
+  const refreshMembershipState = async () => {
+    const userClubs = await api.getMyClubs();
+    setClubs(userClubs);
+    if (userClubs.some((item) => item.id === overview?.club.id)) {
+      const nextOverview = await api.getOverview();
+      setOverview(nextOverview);
+      setCurrentUser(nextOverview.currentUser);
+      return;
+    }
+    if (userClubs[0]) {
+      api.setActiveClubId(userClubs[0].id);
+      const nextOverview = await api.getOverview();
+      setOverview(nextOverview);
+      setCurrentUser(nextOverview.currentUser);
+      setView("overview");
+      return;
+    }
+    setOverview(null);
+    setView("discovery");
+  };
+
+  const performMembershipAction = async (action: () => Promise<unknown>, message: string) => {
+    await action();
+    await refreshMembershipState();
+    setNotice(message);
+    window.setTimeout(() => setNotice(null), 3600);
+  };
+
+  const openDiscoveredClub = async (clubId: string): Promise<MembershipActionResult> => {
+    const membership = await api.requestMembership(clubId);
+    if (membership.status === "active") {
+      api.setActiveClubId(clubId);
+      const [nextOverview, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
+      setOverview(nextOverview);
+      setCurrentUser(nextOverview.currentUser);
+      setClubs(userClubs);
+      setView("overview");
+      setNotice("Club opened.");
+    } else {
+      setNotice("Request sent for approval.");
+    }
+    window.setTimeout(() => setNotice(null), 3600);
+    return membership;
+  };
+
+  const signOut = async () => {
+    await api.signOut();
+    setAccountOpen(false);
+    setError(null);
+    setAuthMessage(null);
+    setAuthenticated(false);
+    setOverview(null);
+    setClubs([]);
+    setCurrentUser(null);
+  };
+
+  const closeAccount = async () => {
+    await api.closeAccount();
+    await api.signOut().catch(() => undefined);
+    setAccountOpen(false);
+    setAuthenticated(false);
+    setOverview(null);
+    setClubs([]);
+    setCurrentUser(null);
+    setAccountClosed(true);
+  };
+
   const signIn = async () => {
     try {
       setAuthMessage(null);
       await api.signIn();
     } catch (cause) {
       setAuthMessage(cause instanceof Error ? cause.message : "Sign-in could not be started.");
+    }
+  };
+
+  const signUp = async () => {
+    try {
+      setAuthMessage(null);
+      await api.signUp();
+    } catch (cause) {
+      setAuthMessage(cause instanceof Error ? cause.message : "Account creation could not be started.");
     }
   };
 
@@ -212,24 +302,28 @@ function App() {
   if (loading) {
     return <div className="loading-screen"><div className="brand-mark">L</div><span>Opening your club</span></div>;
   }
+  if (accountClosed) return <main className="account-closed-screen"><span className="wordmark-stamp">L</span><div className="eyebrow"><span className="eyebrow-line" />ACCOUNT</div><h1>Account closed.</h1><p>Your account is closed and you are signed out. Existing club records remain available to their members.</p></main>;
   if (!authenticated) {
     return <SignInScreen
       configured={api.mode === "oidc"}
       showDemoPreview={import.meta.env.DEV && api.mode === "unconfigured"}
       error={authMessage}
       onSignIn={signIn}
+      onSignUp={signUp}
       onDemoPreview={() => { setError(null); setOverview(null); setApi(demoClubApi); }}
     />;
   }
-  if (error || !overview) {
-    return <div className="error-screen"><h1>We couldn't load the club.</h1><p>{error ?? "Try reloading the page."}</p><button className="button button-primary" onClick={() => window.location.reload()}>Reload</button></div>;
+  if (error) {
+    return <div className="error-screen"><h1>We couldn't load the club.</h1><p>{error ?? "Try reloading the page."}</p><div className="error-actions"><button className="button button-secondary" onClick={() => void signOut()}>Sign out and retry</button><button className="button button-primary" onClick={() => window.location.reload()}>Reload</button></div></div>;
   }
+  if (!overview) return <main className="no-club-screen"><header className="no-club-header"><a className="wordmark" href="#discovery"><span className="wordmark-stamp">L</span><span className="wordmark-name">the club<span className="wordmark-period">.</span></span></a><div className="no-club-actions"><span className="demo-chip"><span className="demo-dot" />SECURE SESSION</span>{currentUser && <button className="button button-secondary" type="button" onClick={() => setAccountOpen(true)}>Account</button>}<button className="button button-primary" type="button" onClick={() => setCreateClubOpen(true)}>Create a club</button></div></header><section className="no-club-content"><div className="eyebrow"><span className="eyebrow-line" />CLUBS / DISCOVER</div><h1>Find your pool.</h1><DiscoveryView api={api} onOpenClub={openDiscoveredClub} /></section>{createClubOpen && <CreateClubDialog onClose={() => setCreateClubOpen(false)} onSubmit={createClub} />}{accountOpen && currentUser && <AccountDialog user={currentUser} onClose={() => setAccountOpen(false)} onSignOut={signOut} onCloseAccount={closeAccount} />}</main>;
 
   const pageTitles: Record<View, { eyebrow: string; title: string; description: string }> = {
     overview: { eyebrow: "YOUR CLUB / OVERVIEW", title: "The good numbers.", description: "A clear look at the tickets, people, and drawings you share." },
     contributions: { eyebrow: "YOUR CLUB / CONTRIBUTIONS", title: "Tickets on the table.", description: "Every entry your members have shared with the club." },
     results: { eyebrow: "YOUR CLUB / DRAWING RESULTS", title: "The latest draw.", description: "Official numbers and club results, with estimates clearly marked." },
     members: { eyebrow: "YOUR CLUB / MEMBERS", title: "The people in your pool.", description: "Membership, roles, and each member's recorded contribution." },
+    discovery: { eyebrow: "CLUBS / DISCOVERY", title: "Find your pool.", description: "Search public clubs or request access to a searchable private club." },
   };
   const page = pageTitles[view];
 
@@ -276,9 +370,9 @@ function App() {
         </div>
         <div className="sidebar-bottom">
           <div className="demo-chip"><span className="demo-dot" />{api.mode === "demo" ? "DEMO DATA" : "SECURE SESSION"}</div>
-          <button className="profile-row" type="button">
-            <span className="profile-avatar">AM</span>
-            <span className="profile-copy"><strong>{overview.currentUser.displayName}</strong><small>Creator</small></span>
+          <button className="profile-row" type="button" aria-haspopup="dialog" onClick={() => setAccountOpen(true)}>
+            <span className="profile-avatar">{userInitials(overview.currentUser.displayName)}</span>
+            <span className="profile-copy"><strong>{overview.currentUser.displayName}</strong><small>{overview.members.find((member) => member.userId === overview.currentUser.id)?.role ?? "member"}</small></span>
             <ChevronDown size={15} />
           </button>
         </div>
@@ -294,7 +388,7 @@ function App() {
             <span className="topbar-date"><CalendarDays size={15} />Monday, November 9</span>
             <button className="icon-button topbar-search" aria-label="Search" onClick={() => setNotice("Search will be connected to the API in a later step.")}><Search size={17} /></button>
             <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setNotice("You're all caught up.")}><Bell size={17} /><span className="notification-dot" /></button>
-            <span className="topbar-avatar">AM</span>
+            <span className="topbar-avatar">{userInitials(overview.currentUser.displayName)}</span>
           </div>
         </header>
 
@@ -311,7 +405,8 @@ function App() {
           {view === "overview" && <OverviewView data={overview} onNavigate={navigate} />}
           {view === "contributions" && <ContributionsView api={api} currentUserId={overview.currentUser.id} contributions={overview.contributions} members={overview.members} onAdd={openNewContribution} onEdit={editContribution} />}
           {view === "results" && <ResultsView results={overview.results} />}
-          {view === "members" && <MembersView data={overview} />}
+          {view === "members" && <MembersView data={overview} api={api} onAction={performMembershipAction} />}
+          {view === "discovery" && <DiscoveryView api={api} onOpenClub={openDiscoveredClub} />}
 
           <footer className="page-footer">
             <span><ShieldCheck size={14} /> For records only. No money is handled by the app.</span>
@@ -322,7 +417,17 @@ function App() {
 
       {notice && <div className="toast" role="status"><Check size={16} />{notice}<button className="toast-close" aria-label="Dismiss" onClick={() => setNotice(null)}><X size={14} /></button></div>}
       {createClubOpen && <CreateClubDialog onClose={() => setCreateClubOpen(false)} onSubmit={createClub} />}
-      {settingsOpen && <ClubSettingsDialog club={overview.club} onClose={() => setSettingsOpen(false)} onSubmit={saveClubSettings} />}
+      {settingsOpen && <ClubSettingsDialog
+        club={overview.club}
+        members={overview.members}
+        currentUserId={overview.currentUser.id}
+        canManageOwnership={api.mode === "oidc"}
+        onClose={() => setSettingsOpen(false)}
+        onSubmit={saveClubSettings}
+        onTransferOwnership={async (userId) => { await performMembershipAction(() => api.transferOwnership(userId), "Club ownership transferred."); setSettingsOpen(false); }}
+        onCloseClub={async () => { await performMembershipAction(() => api.closeClub(), "Club closed."); setSettingsOpen(false); }}
+      />}
+      {accountOpen && <AccountDialog user={overview.currentUser} onClose={() => setAccountOpen(false)} onSignOut={signOut} onCloseAccount={closeAccount} />}
       {dialogOpen && <ContributionDialog key={editingContribution?.id ?? "new-contribution"} api={api} userId={overview.currentUser.id} editingContribution={editingContribution ?? undefined} onClose={() => { setDialogOpen(false); setEditingContribution(null); }} onSubmit={saveContribution} onLearningFeedback={setNotice} />}
     </div>
   );
@@ -333,12 +438,14 @@ function SignInScreen({
   showDemoPreview,
   error,
   onSignIn,
+  onSignUp,
   onDemoPreview,
 }: {
   configured: boolean;
   showDemoPreview: boolean;
   error: string | null;
   onSignIn: () => void;
+  onSignUp: () => void;
   onDemoPreview: () => void;
 }) {
   return <main className="auth-screen">
@@ -346,11 +453,12 @@ function SignInScreen({
       <a className="wordmark auth-wordmark" href="/" aria-label="The Club home"><span className="wordmark-stamp">L</span><span className="wordmark-name">the club<span className="wordmark-period">.</span></span></a>
       <div className="eyebrow"><span className="eyebrow-line" />MEMBER ACCESS</div>
       <h1>{configured ? "Your club, in one place." : "Connect your sign-in provider."}</h1>
-      <p>{configured ? "Sign in to view your tickets, club activity, and drawing results." : "The authenticated API is ready, but this deployment still needs its OIDC issuer, client ID, and club ID configured."}</p>
+      <p>{configured ? "Sign in to view your tickets, club activity, and drawing results." : "The authenticated API is ready, but this deployment still needs its OIDC issuer and client ID configured."}</p>
       {error && <p className="form-error" role="alert">{error}</p>}
       {configured && <button className="button button-primary auth-button" onClick={onSignIn}>Sign in securely <ArrowUpRight size={16} /></button>}
+      {configured && <button className="button button-secondary auth-button" onClick={onSignUp}>Create an account</button>}
       {showDemoPreview && <button className="button button-secondary auth-button" onClick={onDemoPreview}>Preview with demo data</button>}
-      <div className="auth-footnote"><ShieldCheck size={14} />Your identity provider handles sign-in. Passwords are never stored here.</div>
+      <div className="auth-footnote"><ShieldCheck size={14} />Your identity provider handles account creation and email verification. Passwords are never stored here.</div>
     </div>
     <div className="auth-rail"><div className="auth-rail-mark">L</div><span>MEMBER-OWNED RECORDS</span></div>
   </main>;
@@ -523,27 +631,136 @@ function TicketPhotoDialog({ api, currentUserId, ticket, onClose }: { api: ClubA
 }
 
 function ResultsView({ results }: { results: DrawingResultView[] }) {
-  return <section className="results-table-list">{results.map(({ drawing, result, winningTicketCount, grossPrizeTotal }) => {
+  const [expandedDrawingId, setExpandedDrawingId] = useState<string | null>(null);
+  return <section className="results-table-list">{results.map(({ drawing, result, winningTicketCount, grossPrizeTotal, payouts }) => {
     const state = drawingResultState(result);
     const calculated = state === "calculated" || state === "recalculated";
     const label = state === "pending_results" ? "Pending results" : state === "pending_calculation" ? "Pending calculation" : state === "recalculated" ? "Recalculated" : "Calculated";
     return (
-    <article className="result-record" key={drawing.id}>
+    <Fragment key={drawing.id}>
+    <article className="result-record">
       <div className="result-record-date"><span>{formatDate(drawing.drawingDate, { month: "short", day: "numeric" })}</span><small>{formatDate(drawing.drawingDate, { year: "numeric" })}</small></div>
       <div className="result-record-main"><LotteryBadge lottery={drawing.lottery} compact /><strong>{lotteryName(drawing.lottery)}</strong><span>{state === "pending_results" ? "Official result pending" : "Official result posted"}</span></div>
       {state !== "pending_results" ? <NumberSet numbers={(result?.officialWinningNumbers?.numbers as number[]) ?? []} bonus={String(result?.officialWinningNumbers?.bonusNumber ?? "")} lottery={drawing.lottery} /> : <span className="pending-copy"><Clock3 size={14} />Numbers pending</span>}
-      <div className="result-record-total"><small>{calculated && winningTicketCount ? `${winningTicketCount} winning ticket` : "Club prizes"}</small><strong>{calculated ? money(grossPrizeTotal) : "—"}</strong></div>
+      <div className="result-record-total"><small>{calculated && winningTicketCount ? `${winningTicketCount} winning ticket` : "Gross club prizes"}</small><strong>{calculated ? money(grossPrizeTotal) : "—"}</strong></div>
       <StatusTag label={label} tone={calculated ? "success" : "warning"} />
     </article>
+    {calculated && payouts.length > 0 && <div className="payout-breakdown">
+      <button className="text-button payout-toggle" type="button" aria-expanded={expandedDrawingId === drawing.id} onClick={() => setExpandedDrawingId((current) => current === drawing.id ? null : drawing.id)}>{expandedDrawingId === drawing.id ? "Hide payouts" : `View ${payouts.length} payout${payouts.length === 1 ? "" : "s"}`}<ChevronDown size={14} /></button>
+      {expandedDrawingId === drawing.id && <div className="payout-list" role="region" aria-label={`${lotteryName(drawing.lottery)} payout allocation`}>
+        <div className="payout-list-heading"><span>Member</span><span>Gross prize</span><span>Allocated share</span></div>
+        {payouts.map((payout) => <div className="payout-row" key={`${drawing.id}-${payout.userId}-${payout.prizeType}`}><span>{payout.memberName}</span><span>{money(payout.grossPrizeAmount)}</span><strong>{money(payout.shareAmount)}</strong></div>)}
+        <p className="payout-note">Recorded allocations only. No money is transferred by the app.</p>
+      </div>}
+    </div>}
+    </Fragment>
     );
   })}</section>;
 }
 
-function MembersView({ data }: { data: ClubOverview }) {
+function DiscoveryView({ api, onOpenClub }: { api: ClubApi; onOpenClub: (clubId: string) => Promise<MembershipActionResult> }) {
+  const [query, setQuery] = useState("");
+  const [clubs, setClubs] = useState<ClubDiscoverySummary[]>([]);
+  const [searched, setSearched] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const search = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (query.trim().length < 2) { setError("Enter at least two characters."); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      setClubs(await api.searchClubs(query.trim()));
+      setSearched(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Clubs could not be searched.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openClub = async (clubId: string) => {
+    setError(null);
+    try {
+      const membership = await onOpenClub(clubId);
+      if (membership.status === "pending" && query.trim().length >= 2) setClubs(await api.searchClubs(query.trim()));
+    }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Membership could not be updated."); }
+  };
+
+  return <section className="data-section discovery-section">
+    <form className="discovery-search" onSubmit={search}>
+      <label className="sr-only" htmlFor="club-discovery-search">Club name</label>
+      <Search size={18} aria-hidden="true" />
+      <input id="club-discovery-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by club name" maxLength={80} />
+      <button className="button button-primary" type="submit" disabled={loading}>{loading ? "Searching..." : "Search"}</button>
+    </form>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    {searched && clubs.length === 0 && <p className="discovery-empty">No searchable clubs match that name.</p>}
+    <div className="discovery-list">
+      {clubs.map((item) => {
+        const active = item.membershipStatus === "active";
+        const pending = item.membershipStatus === "pending";
+        const label = active ? "Open club" : pending ? "Request pending" : item.visibility === "public" ? "Join club" : "Request access";
+        return <article className="discovery-row" key={item.id}>
+          <div className="discovery-club-mark">{item.visibility === "private" ? <LockKeyhole size={18} /> : <Users size={18} />}</div>
+          <div className="discovery-club-copy">
+            <div className="discovery-club-title"><h2>{item.name}</h2><span>{item.visibility}</span></div>
+            {item.visibility === "public" && <p>{item.description || item.motto || `${item.memberCount} active ${item.memberCount === 1 ? "member" : "members"}`}</p>}
+          </div>
+          <button className="button button-secondary" type="button" disabled={pending || api.mode !== "oidc"} onClick={() => void openClub(item.id)}>{api.mode === "demo" ? "Preview only" : label}</button>
+        </article>;
+      })}
+    </div>
+  </section>;
+}
+
+function MembersView({ data, api, onAction }: { data: ClubOverview; api: ClubApi; onAction: (action: () => Promise<unknown>, message: string) => Promise<void> }) {
+  const currentMember = data.members.find((member) => member.userId === data.currentUser.id);
+  const role = currentMember?.role ?? "member";
+  const canModerate = api.mode === "oidc" && (role === "creator" || role === "admin");
+  const isCreator = api.mode === "oidc" && role === "creator";
+  const [requests, setRequests] = useState<MembershipRequestView[]>([]);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canModerate) return;
+    let mounted = true;
+    api.getMembershipRequests().then((items) => { if (mounted) setRequests(items); }).catch((cause: unknown) => {
+      if (mounted) setRequestError(cause instanceof Error ? cause.message : "Membership requests could not be loaded.");
+    });
+    return () => { mounted = false; };
+  }, [api, canModerate, data.club.id]);
+
+  const runAction = async (action: () => Promise<unknown>, message: string) => {
+    setActionError(null);
+    try {
+      await onAction(action, message);
+      if (canModerate) setRequests(await api.getMembershipRequests());
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Membership could not be updated.");
+    }
+  };
+
   return <section className="data-section member-section">
-    <div className="member-intro"><div><span className="section-kicker">THE ROSTER</span><h2>{data.members.length} members, one shared pool.</h2><p>Only eligible members are included in each drawing's payout calculation.</p></div><span className="private-pill"><LockKeyhole size={13} />Private</span></div>
-    <div className="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th>Tickets</th><th>Contributions</th><th>Joined</th><th>Eligibility</th></tr></thead><tbody>
-      {data.members.map((member, index) => <tr key={member.id}><td><span className={`member-table-name`}><span className={`member-avatar avatar-${index % 5}`}>{member.initials}</span><span><strong>{member.displayName}</strong><small>{member.email}</small></span></span></td><td><StatusTag label={member.role} tone={member.role === "creator" ? "mint" : "neutral"} /></td><td>{member.ticketCount}</td><td className="money-cell">{money(member.contributionTotalUsd)}</td><td>{formatDate(member.joinedAt.slice(0, 10), { month: "short", day: "numeric" })}</td><td><span className="eligible-label"><span />Eligible for next draw</span></td></tr>)}
+    <div className="member-intro"><div><span className="section-kicker">THE ROSTER</span><h2>{data.members.length} members, one shared pool.</h2><p>Only eligible members are included in each drawing's payout calculation.</p></div><span className="private-pill">{data.club.visibility === "private" ? <LockKeyhole size={13} /> : <Users size={13} />}{data.club.visibility}</span></div>
+    {(canModerate || currentMember?.role !== "creator") && <div className="membership-toolbar">
+      {canModerate && <span>{requests.length} pending {requests.length === 1 ? "request" : "requests"}</span>}
+      {currentMember?.role !== "creator" && api.mode === "oidc" && <button className="button button-secondary" type="button" onClick={() => window.confirm("Leave this club? You will lose eligibility for future drawings.") && void runAction(() => api.leaveClub(), "You left the club.")}>Leave club</button>}
+    </div>}
+    {requestError && <p className="form-error" role="alert">{requestError}</p>}
+    {actionError && <p className="form-error" role="alert">{actionError}</p>}
+    {canModerate && requests.length > 0 && <div className="request-list" aria-label="Pending membership requests">
+      {requests.map((request) => <div className="request-row" key={request.membershipId}>
+        <span className="request-person"><strong>{request.displayName}</strong><small>{request.email}</small></span>
+        <span className="request-date">Requested {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(request.requestedAt))}</span>
+        <div className="request-actions"><button className="button button-secondary" type="button" onClick={() => void runAction(() => api.rejectMembership(request.userId), "Request declined.")}>Decline</button><button className="button button-primary" type="button" onClick={() => void runAction(() => api.approveMembership(request.userId), "Member approved.")}>Approve</button></div>
+      </div>)}
+    </div>}
+    <div className="table-wrap"><table><thead><tr><th>Member</th><th>Role</th><th>Tickets</th><th>Contributions</th><th>Joined</th><th>Eligibility</th>{isCreator && <th>Manage</th>}</tr></thead><tbody>
+      {data.members.map((member, index) => <tr key={member.id}><td><span className="member-table-name"><span className={`member-avatar avatar-${index % 5}`}>{member.initials}</span><span><strong>{member.displayName}</strong><small>{member.email}</small></span></span></td><td><StatusTag label={member.role} tone={member.role === "creator" ? "mint" : "neutral"} /></td><td>{member.ticketCount}</td><td className="money-cell">{money(member.contributionTotalUsd)}</td><td>{formatDate(member.joinedAt.slice(0, 10), { month: "short", day: "numeric" })}</td><td><span className="eligible-label"><span />Eligible for next draw</span></td>{isCreator && <td><div className="member-actions">{member.role !== "creator" && member.userId !== data.currentUser.id && <><button className="text-action" type="button" onClick={() => void runAction(() => api.updateMembershipRole(member.userId, member.role === "admin" ? "member" : "admin"), member.role === "admin" ? "Admin role removed." : "Admin role granted.")}>{member.role === "admin" ? "Remove admin" : "Make admin"}</button><button className="text-action text-action-danger" type="button" onClick={() => window.confirm(`Remove ${member.displayName} from this club?`) && void runAction(() => api.removeMember(member.userId), "Member removed.")}>Remove</button></>}</div></td>}</tr>)}
     </tbody></table></div>
   </section>;
 }
@@ -571,14 +788,26 @@ function StatusTag({ label, tone }: { label: string; tone: "success" | "warning"
   return <span className={`status-tag status-${tone}`}><span />{label}</span>;
 }
 
-function ClubSettingsDialog({ club, onClose, onSubmit }: { club: Club; onClose: () => void; onSubmit: (input: UpdateClubSettingsRequest) => Promise<void> }) {
+function ClubSettingsDialog({ club, members, currentUserId, canManageOwnership, onClose, onSubmit, onTransferOwnership, onCloseClub }: {
+  club: Club;
+  members: ClubMemberView[];
+  currentUserId: string;
+  canManageOwnership: boolean;
+  onClose: () => void;
+  onSubmit: (input: UpdateClubSettingsRequest) => Promise<void>;
+  onTransferOwnership: (userId: string) => Promise<void>;
+  onCloseClub: () => Promise<void>;
+}) {
   const [name, setName] = useState(club.name);
   const [description, setDescription] = useState(club.description ?? "");
   const [motto, setMotto] = useState(club.motto ?? "");
   const [visibility, setVisibility] = useState(club.visibility);
   const [allowSearch, setAllowSearch] = useState(club.allowSearch);
+  const [newOwnerUserId, setNewOwnerUserId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const isCreator = canManageOwnership && members.some((member) => member.userId === currentUserId && member.role === "creator");
+  const admins = members.filter((member) => member.role === "admin" && member.userId !== currentUserId);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -599,6 +828,14 @@ function ClubSettingsDialog({ club, onClose, onSubmit }: { club: Club; onClose: 
     }
   };
 
+  const runGovernanceAction = async (action: () => Promise<void>) => {
+    setSaving(true);
+    setError(null);
+    try { await action(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Club management action could not be completed."); }
+    finally { setSaving(false); }
+  };
+
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
     <section className="contribution-dialog create-club-dialog" role="dialog" aria-modal="true" aria-labelledby="club-settings-title">
       <div className="dialog-head"><div><span className="section-kicker">CLUB</span><h2 id="club-settings-title">Club settings</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog" disabled={saving}><X size={18} /></button></div>
@@ -609,9 +846,49 @@ function ClubSettingsDialog({ club, onClose, onSubmit }: { club: Club; onClose: 
         <label className="field-label">Visibility<select value={visibility} onChange={(event) => setVisibility(event.target.value as Club["visibility"])}><option value="private">Private</option><option value="public">Public</option></select></label>
         {visibility === "private" && <label className="club-setting-toggle"><input type="checkbox" checked={allowSearch} onChange={(event) => setAllowSearch(event.target.checked)} />Allow this private club to appear in search</label>}
         <p className="photo-help">Payout configuration and supported lotteries are fixed when the club is created.</p>
+        {isCreator && <section className="club-governance">
+          <div><span className="section-kicker">OWNERSHIP</span><p>Transfer the Creator role to an active Admin. Promote a member from the roster first if needed.</p></div>
+          <label className="field-label">New owner<select value={newOwnerUserId} onChange={(event) => setNewOwnerUserId(event.target.value)} disabled={!admins.length || saving}><option value="">{admins.length ? "Select an Admin" : "No Admins available"}</option>{admins.map((admin) => <option key={admin.userId} value={admin.userId}>{admin.displayName}</option>)}</select></label>
+          <button className="button button-secondary" type="button" disabled={!newOwnerUserId || saving} onClick={() => window.confirm("Transfer ownership? You will become an Admin.") && void runGovernanceAction(() => onTransferOwnership(newOwnerUserId))}>Transfer ownership</button>
+          <div className="club-close-action"><p>Close this club when it has no future contributions or incomplete payouts.</p><button className="button button-danger" type="button" disabled={saving} onClick={() => window.confirm("Close this club? Members will lose access to future club activity.") && void runGovernanceAction(onCloseClub)}>Close club</button></div>
+        </section>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose} disabled={saving}>Cancel</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving..." : "Save settings"}</button></div>
       </form>
+    </section>
+  </div>;
+}
+
+function AccountDialog({ user, onClose, onSignOut, onCloseAccount }: { user: User; onClose: () => void; onSignOut: () => Promise<void>; onCloseAccount: () => Promise<void> }) {
+  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try { await action(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "The account action could not be completed."); }
+    finally { setBusy(false); }
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (confirmation !== "CLOSE") { setError('Type "CLOSE" to confirm account closure.'); return; }
+    void run(onCloseAccount);
+  };
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+    <section className="contribution-dialog account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
+      <div className="dialog-head"><div><span className="section-kicker">ACCOUNT</span><h2 id="account-dialog-title">Your account</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close account dialog" disabled={busy}><X size={18} /></button></div>
+      <div className="account-identity"><span className="profile-avatar">{userInitials(user.displayName)}</span><span><strong>{user.displayName}</strong><small>{user.email}</small></span></div>
+      <p className="account-retention">Closing your account disables sign-in. Existing club records remain available to club members. Transfer ownership or close all active clubs first.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {!confirming ? <div className="dialog-actions account-actions"><button className="button button-secondary" type="button" onClick={() => void run(onSignOut)} disabled={busy}>{busy ? "Working..." : "Sign out"}</button><button className="button button-danger" type="button" onClick={() => { setError(null); setConfirming(true); }}>Close account</button></div> : <form onSubmit={submit}>
+        <label className="field-label">Type CLOSE to confirm<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" required /></label>
+        <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={() => { setConfirming(false); setConfirmation(""); setError(null); }} disabled={busy}>Cancel</button><button className="button button-danger" type="submit" disabled={busy || confirmation !== "CLOSE"}>{busy ? "Closing..." : "Close account"}</button></div>
+      </form>}
     </section>
   </div>;
 }

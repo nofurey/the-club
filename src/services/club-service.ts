@@ -61,6 +61,8 @@ export interface ClubRepository {
   createThresholdRule(rule: ThresholdRule): Promise<ThresholdRule>;
 
   hasFutureContributionForUserInClub(userId: string, clubId: string): Promise<boolean>;
+  hasPendingPayoutForUserInClub(userId: string, clubId: string): Promise<boolean>;
+  hasCutoffCalculationInProgress(clubId: string): Promise<boolean>;
   hasIncompletePayouts(clubId: string): Promise<boolean>;
   findContributionsForClub(clubId: string): Promise<Contribution[]>;
 }
@@ -157,7 +159,19 @@ export class ClubService {
 
     const existing = await this.repo.findMembershipByClubAndUser(clubId, userId);
     if (existing) {
-      return existing;
+      if (existing.status !== "removed") return existing;
+      const now = new Date().toISOString();
+      const reactivated: ClubMembership = {
+        ...existing,
+        role: "member",
+        status: club.visibility === "public" ? "active" : "pending",
+        joinedAt: now,
+        approvedAt: club.visibility === "public" ? now : null,
+        removedAt: null,
+        removedByUserId: null,
+        updatedAt: now,
+      };
+      return this.repo.updateMembership(reactivated);
     }
 
     const now = new Date().toISOString();
@@ -209,6 +223,9 @@ export class ClubService {
     if (!membership) {
       throw new Error("Membership not found.");
     }
+    if (membership.status !== "pending") {
+      throw new Error("Membership is not pending approval.");
+    }
 
     const updated: ClubMembership = {
       ...membership,
@@ -252,7 +269,7 @@ export class ClubService {
 
   async removeMember({ clubId, userId, actingUserId }: UpdateMembershipInput): Promise<ClubMembership> {
     const actingMembership = await this.repo.findMembershipByClubAndUser(clubId, actingUserId);
-    if (!actingMembership || actingMembership.role !== "creator") {
+    if (!actingMembership || actingMembership.status !== "active" || actingMembership.role !== "creator") {
       throw new Error("Only the creator may forcibly remove a member.");
     }
 
@@ -264,6 +281,15 @@ export class ClubService {
     if (membership.role === "creator") {
       throw new Error("Creator cannot be removed through this workflow.");
     }
+    if (membership.status !== "active") {
+      throw new Error("Only active members can be forcibly removed.");
+    }
+    if (await this.repo.hasCutoffCalculationInProgress(clubId)) {
+      throw new Error("Member removal is blocked until post-cutoff payout calculations are complete.");
+    }
+    if (await this.repo.hasPendingPayoutForUserInClub(userId, clubId)) {
+      throw new Error("Member removal is blocked while the member has a pending payout.");
+    }
 
     const updated: ClubMembership = {
       ...membership,
@@ -274,6 +300,21 @@ export class ClubService {
     };
 
     return this.repo.updateMembership(updated);
+  }
+
+  async updateMembershipRole(clubId: string, userId: string, actingUserId: string, role: "admin" | "member"): Promise<ClubMembership> {
+    const actingMembership = await this.repo.findMembershipByClubAndUser(clubId, actingUserId);
+    if (!actingMembership || actingMembership.status !== "active" || actingMembership.role !== "creator") {
+      throw new Error("Only the creator may change member roles.");
+    }
+    const membership = await this.repo.findMembershipByClubAndUser(clubId, userId);
+    if (!membership || membership.status !== "active") {
+      throw new Error("An active target membership is required.");
+    }
+    if (membership.role === "creator") {
+      throw new Error("Creator role can only change through ownership transfer.");
+    }
+    return this.repo.updateMembership({ ...membership, role, updatedAt: new Date().toISOString() });
   }
 
   async transferOwnership({ clubId, currentOwnerUserId, newOwnerUserId }: TransferOwnershipInput): Promise<Club> {
@@ -363,7 +404,7 @@ export class ClubService {
 
   private async assertModeratorPermission(clubId: string, actingUserId: string): Promise<void> {
     const membership = await this.repo.findMembershipByClubAndUser(clubId, actingUserId);
-    if (!membership) {
+    if (!membership || membership.status !== "active") {
       throw new Error("User is not a member of the club.");
     }
 

@@ -19,6 +19,29 @@ export function getMaxNumberSets(_lottery: LotteryType): number {
   return 10;
 }
 
+export function getDrawingCutoffAtEt(drawingDate: string, cutoffTimeEt: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(drawingDate) || !/^\d{2}:\d{2}:\d{2}$/.test(cutoffTimeEt)) {
+    throw new Error("Drawing cutoff must contain a valid date and Eastern time.");
+  }
+  const wallTimeAsUtc = Date.parse(`${drawingDate}T${cutoffTimeEt}Z`);
+  if (!Number.isFinite(wallTimeAsUtc) || new Date(wallTimeAsUtc).toISOString().slice(0, 10) !== drawingDate) {
+    throw new Error("Drawing cutoff date is invalid.");
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(wallTimeAsUtc));
+  const values = Object.fromEntries(parts.map((part) => [part.type, Number(part.value)]));
+  const renderedAsUtc = Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second);
+  return new Date(wallTimeAsUtc - (renderedAsUtc - wallTimeAsUtc)).toISOString();
+}
+
 export function isAllowedDrawingCount(lottery: LotteryType, drawingCount: number): boolean {
   return getDrawingCountOptions(lottery, SCHEDULE[lottery].maxDrawings).includes(drawingCount);
 }

@@ -6,6 +6,8 @@ import { PostgresClubApiRepository } from "./postgres-club-api-repository";
 import { MichiganLotteryGraphqlProvider } from "../services/michigan-lottery-graphql-provider";
 import { OfficialLotteryDataService } from "../services/official-lottery-data-service";
 import { PostgresClubRepository } from "../services/postgres-club-repository";
+import { DrawingCalculationService } from "../services/drawing-calculation-service";
+import { SnapshotLotteryPrizeEvaluator } from "../services/lottery-prize-evaluator";
 import { wrapPgLikeClient } from "../services/postgres-client";
 
 function requiredEnvironment(name: string): string {
@@ -52,6 +54,20 @@ async function main(): Promise<void> {
       }));
       if (outcomes.some((outcome) => outcome.status === "rejected")) {
         throw new Error("Official data refresh failed for one or more upcoming drawings.");
+      }
+    },
+    recalculateDrawings: async (clubId, targets) => {
+      const connection = await pool.connect();
+      try {
+        const calculator = new DrawingCalculationService(
+          new PostgresClubRepository(wrapPgLikeClient(connection)),
+          new SnapshotLotteryPrizeEvaluator()
+        );
+        for (const target of targets) {
+          await calculator.calculateDrawing({ ...target, clubId, recalculation: true });
+        }
+      } finally {
+        connection.release();
       }
     },
     verifyToken: createOidcTokenVerifier({

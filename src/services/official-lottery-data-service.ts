@@ -67,6 +67,7 @@ export interface OfficialDataRepository {
     rulesChanged: boolean;
     resultChanged: boolean;
     drawingSizeUpdated: boolean;
+    recalculationRequired?: boolean;
   }>;
 }
 
@@ -81,6 +82,7 @@ export interface OfficialDataRefreshResult {
   rulesChanged: boolean;
   resultChanged: boolean;
   drawingSizeUpdated: boolean;
+  recalculationRequired?: boolean;
 }
 
 export interface HttpOfficialLotteryProviderOptions {

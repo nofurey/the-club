@@ -5,22 +5,33 @@ import { fileTypeFromBuffer } from "file-type";
 import { z } from "zod";
 
 import type { Contribution, Drawing, LotteryType, User } from "../domain";
-import type { ClubOverview, CreateClubRequest, CreateContributionInput, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./contracts";
+import type { ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UserClubSummary } from "./contracts";
 import { LotteryTypeSchema } from "../validators";
 import { ClubApiError } from "./errors";
-import type { OidcIdentity, OidcTokenVerifier } from "./oidc-auth";
+import { OidcEmailVerificationRequiredError, type OidcIdentity, type OidcTokenVerifier } from "./oidc-auth";
 import { getMaxNumberSets, isAllowedDrawingCount } from "../services/drawing-schedule";
 
 export interface ClubApiRepository {
   provisionOidcUser(identity: OidcIdentity): Promise<User>;
+  closeAccount(userId: string): Promise<void>;
   listUserClubs(userId: string): Promise<UserClubSummary[]>;
+  searchClubs(userId: string, query: string): Promise<ClubDiscoverySummary[]>;
+  requestMembership(userId: string, clubId: string): Promise<MembershipActionResult>;
+  listMembershipRequests(userId: string, clubId: string): Promise<MembershipRequestView[]>;
+  approveMembership(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult>;
+  rejectMembership(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult>;
+  leaveClub(userId: string, clubId: string): Promise<MembershipActionResult>;
+  removeMember(userId: string, clubId: string, memberUserId: string): Promise<MembershipActionResult>;
+  updateMembershipRole(userId: string, clubId: string, memberUserId: string, role: "admin" | "member"): Promise<MembershipActionResult>;
+  closeClub(userId: string, clubId: string): Promise<void>;
+  transferClubOwnership(userId: string, clubId: string, newOwnerUserId: string): Promise<void>;
   updateClubSettings(userId: string, clubId: string, input: UpdateClubSettingsRequest): Promise<import("../domain").Club | null>;
   createClub(userId: string, input: CreateClubRequest): Promise<{ id: string }>;
   getClubOverview(userId: string, clubId: string): Promise<ClubOverview | null>;
   ensureUpcomingDrawings(userId: string, clubId: string): Promise<Drawing[] | null>;
   getTicketDrawingOptions(userId: string, clubId: string): Promise<TicketDrawingOption[] | null>;
   createContribution(userId: string, clubId: string, input: CreateContributionInput, photo?: TicketPhoto): Promise<Contribution>;
-    updateContribution(userId: string, clubId: string, contributionId: string, input: CreateContributionInput): Promise<Contribution>;
+    updateContribution(userId: string, clubId: string, contributionId: string, input: CreateContributionInput): Promise<UpdateContributionRepositoryResult>;
   getContributionPhoto(userId: string, clubId: string, contributionId: string): Promise<TicketPhoto | null>;
 }
 
@@ -34,6 +45,7 @@ export interface ClubApiServerOptions {
   verifyToken: OidcTokenVerifier;
   webOrigin: string;
   prepareTicketDrawings?: (userId: string, clubId: string, drawings: Drawing[]) => Promise<void>;
+  recalculateDrawings?: (clubId: string, targets: RecalculationTarget[]) => Promise<void>;
   logger?: boolean;
 }
 
@@ -44,6 +56,10 @@ declare module "fastify" {
 }
 
 const clubParamsSchema = z.object({ clubId: z.string().uuid() });
+const clubMemberParamsSchema = z.object({ clubId: z.string().uuid(), userId: z.string().uuid() });
+const discoveryQuerySchema = z.object({ q: z.string().trim().min(2).max(80) }).strict();
+const membershipRoleSchema = z.object({ role: z.enum(["admin", "member"]) }).strict();
+const ownershipTransferSchema = z.object({ newOwnerUserId: z.string().uuid() }).strict();
 const updateClubSettingsSchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().trim().max(500).nullable(),
@@ -88,7 +104,7 @@ function missingOfficialDataByLottery(drawings: Drawing[], options: TicketDrawin
   return [...missing.values()];
 }
 
-export async function buildClubApiServer({ repository, verifyToken, webOrigin, prepareTicketDrawings, logger = false }: ClubApiServerOptions): Promise<FastifyInstance> {
+export async function buildClubApiServer({ repository, verifyToken, webOrigin, prepareTicketDrawings, recalculateDrawings, logger = false }: ClubApiServerOptions): Promise<FastifyInstance> {
   const server = Fastify({ logger, trustProxy: false, bodyLimit: 16 * 1024 });
   server.decorateRequest("authenticatedUser", null);
   await server.register(cors, {
@@ -123,6 +139,9 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
     try {
       identity = await verifyToken(authorization.slice("Bearer ".length));
     } catch (error) {
+      if (error instanceof OidcEmailVerificationRequiredError) {
+        return reply.code(403).send({ error: "email_verification_required", message: error.message });
+      }
       request.log.warn({
         errorName: error instanceof Error ? error.name : "UnknownError",
         errorMessage: error instanceof Error ? error.message : "Token verification failed.",
@@ -154,6 +173,75 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
   server.get("/api/v1/me/clubs", { preHandler: authenticate }, async (request) => ({
     clubs: await repository.listUserClubs(request.authenticatedUser!.id),
   }));
+
+  server.post("/api/v1/me/close", { preHandler: authenticate }, async (request, reply) => {
+    await repository.closeAccount(request.authenticatedUser!.id);
+    return reply.code(204).send();
+  });
+
+  server.get<{ Querystring: { q?: string } }>("/api/v1/clubs/discovery", { preHandler: authenticate }, async (request) => {
+    const parsedQuery = discoveryQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) throw new ClubApiError(400, "Enter at least two characters to search clubs.", "invalid_discovery_query");
+    return { clubs: await repository.searchClubs(request.authenticatedUser!.id, parsedQuery.data.q) };
+  });
+
+  server.post<{ Params: { clubId: string } }>("/api/v1/clubs/:clubId/membership", { preHandler: authenticate }, async (request, reply) => {
+    const params = clubParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "A valid club ID is required.", "invalid_club_id");
+    return reply.code(201).send({ membership: await repository.requestMembership(request.authenticatedUser!.id, params.data.clubId) });
+  });
+
+  server.get<{ Params: { clubId: string } }>("/api/v1/clubs/:clubId/membership-requests", { preHandler: authenticate }, async (request) => {
+    const params = clubParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "A valid club ID is required.", "invalid_club_id");
+    return { requests: await repository.listMembershipRequests(request.authenticatedUser!.id, params.data.clubId) };
+  });
+
+  server.post<{ Params: { clubId: string; userId: string } }>("/api/v1/clubs/:clubId/membership-requests/:userId/approve", { preHandler: authenticate }, async (request) => {
+    const params = clubMemberParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "Valid club and member IDs are required.", "invalid_membership_id");
+    return { membership: await repository.approveMembership(request.authenticatedUser!.id, params.data.clubId, params.data.userId) };
+  });
+
+  server.post<{ Params: { clubId: string; userId: string } }>("/api/v1/clubs/:clubId/membership-requests/:userId/reject", { preHandler: authenticate }, async (request) => {
+    const params = clubMemberParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "Valid club and member IDs are required.", "invalid_membership_id");
+    return { membership: await repository.rejectMembership(request.authenticatedUser!.id, params.data.clubId, params.data.userId) };
+  });
+
+  server.post<{ Params: { clubId: string } }>("/api/v1/clubs/:clubId/leave", { preHandler: authenticate }, async (request) => {
+    const params = clubParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "A valid club ID is required.", "invalid_club_id");
+    return { membership: await repository.leaveClub(request.authenticatedUser!.id, params.data.clubId) };
+  });
+
+  server.post<{ Params: { clubId: string } }>("/api/v1/clubs/:clubId/close", { preHandler: authenticate }, async (request, reply) => {
+    const params = clubParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "A valid club ID is required.", "invalid_club_id");
+    await repository.closeClub(request.authenticatedUser!.id, params.data.clubId);
+    return reply.code(204).send();
+  });
+
+  server.post<{ Params: { clubId: string }; Body: unknown }>("/api/v1/clubs/:clubId/transfer-ownership", { preHandler: authenticate }, async (request, reply) => {
+    const params = clubParamsSchema.safeParse(request.params);
+    const body = ownershipTransferSchema.safeParse(request.body);
+    if (!params.success || !body.success) throw new ClubApiError(400, "Ownership transfer details are invalid.", "invalid_ownership_transfer");
+    await repository.transferClubOwnership(request.authenticatedUser!.id, params.data.clubId, body.data.newOwnerUserId);
+    return reply.code(204).send();
+  });
+
+  server.post<{ Params: { clubId: string; userId: string } }>("/api/v1/clubs/:clubId/members/:userId/remove", { preHandler: authenticate }, async (request) => {
+    const params = clubMemberParamsSchema.safeParse(request.params);
+    if (!params.success) throw new ClubApiError(400, "Valid club and member IDs are required.", "invalid_membership_id");
+    return { membership: await repository.removeMember(request.authenticatedUser!.id, params.data.clubId, params.data.userId) };
+  });
+
+  server.patch<{ Params: { clubId: string; userId: string }; Body: unknown }>("/api/v1/clubs/:clubId/members/:userId/role", { preHandler: authenticate }, async (request) => {
+    const params = clubMemberParamsSchema.safeParse(request.params);
+    const body = membershipRoleSchema.safeParse(request.body);
+    if (!params.success || !body.success) throw new ClubApiError(400, "Membership role update is invalid.", "invalid_membership_role");
+    return { membership: await repository.updateMembershipRole(request.authenticatedUser!.id, params.data.clubId, params.data.userId, body.data.role) };
+  });
 
   server.post<{ Body: unknown }>("/api/v1/clubs", { preHandler: authenticate }, async (request, reply) => {
     const parsedBody = createClubSchema.safeParse(request.body);
@@ -273,12 +361,28 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
     if (!params.success) throw new ClubApiError(400, "Valid club and contribution IDs are required.", "invalid_id");
     const parsedBody = createContributionSchema.safeParse(request.body);
     if (!parsedBody.success) throw new ClubApiError(400, "Contribution data is invalid.", "invalid_contribution");
-    return repository.updateContribution(
+    const updated = await repository.updateContribution(
       request.authenticatedUser!.id,
       params.data.clubId,
       params.data.contributionId,
       parsedBody.data
     );
+    let recalculationPending = updated.recalculationTargets.length > 0;
+    let recalculatedDrawingCount = 0;
+    if (recalculationPending && recalculateDrawings) {
+      try {
+        await recalculateDrawings(params.data.clubId, updated.recalculationTargets);
+        recalculatedDrawingCount = updated.recalculationTargets.length;
+        recalculationPending = false;
+      } catch (error) {
+        request.log.error({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Ticket edit recalculation failed");
+      }
+    }
+    return {
+      contribution: updated.contribution,
+      recalculatedDrawingCount,
+      recalculationPending,
+    };
   });
 
   server.get<{ Params: { clubId: string; contributionId: string } }>("/api/v1/clubs/:clubId/contributions/:contributionId/photo", { preHandler: authenticate }, async (request, reply) => {

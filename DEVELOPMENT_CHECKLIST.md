@@ -12,7 +12,7 @@
 - [x] Fetch Michigan Lottery rules and results through its public GraphQL endpoint; retain source documents and hashes.
 - [x] Fetch Powerball and Mega Millions next-drawing jackpot estimates and cash values; store them on the matching drawing with source metadata.
 - [x] Make official-data refreshes idempotent and clear stale awards when normalized rules or results change.
-- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (58 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
+- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (62 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
 - [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations, OIDC user linking, API overview/contribution operations, and refresh target discovery ran in a temporary schema).
 - [x] Fix PostgreSQL enum parameter inference in the drawing-status update.
 - [x] Smoke-test both jackpot/cash endpoints against their live next-drawing dates.
@@ -53,9 +53,12 @@
 
 ## Remaining
 
-- [ ] Recalculate and audit tickets changed after a drawing cutoff or posted result.
-- [ ] Run drawing calculations after official results are refreshed and expose awards and payout allocations.
-- [ ] Add club discovery, join requests, and membership management to the authenticated API and frontend.
+- [x] Add profile sign-out, atomic Creator transfer, guarded club closure, and authenticated account closure with active-club ownership guards.
+- [x] Add identity-provider account registration entry point and provision app users on first verified OIDC sign-in.
+
+- [x] Recalculate and audit tickets changed after a drawing cutoff or posted result.
+- [x] Run drawing calculations after official results are refreshed and expose awards and payout allocations.
+- [x] Add privacy-safe club discovery, join requests, moderation, role management, leave, and guarded member removal to the authenticated API and frontend.
 - [ ] Monitor the site-owned API response formats and confirm permitted use before production reliance; these endpoints are not documented public APIs.
 - [ ] Define retention and cleanup for raw source documents and historical calculation artifacts.
 - [ ] Add notification delivery and recalculation notices after payout calculations complete.

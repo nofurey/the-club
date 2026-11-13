@@ -2,7 +2,7 @@ import { UserManager, WebStorageStateStore, type UserManagerSettings } from "oid
 
 import type { Contribution } from "../../../src/domain";
 import { demoClubApi } from "./demo-club-api";
-import type { Club, ClubApi, ClubOverview, CreateClubRequest, CreateContributionInput, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./contracts";
+import type { Club, ClubApi, ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionResult, User, UserClubSummary } from "./contracts";
 
 class ApiResponseError extends Error {
   constructor(message: string, readonly status: number) {
@@ -29,8 +29,16 @@ class OidcHttpClubApi implements ClubApi {
 
   private async initializeOnce(): Promise<boolean> {
     if (new URLSearchParams(window.location.search).has("code")) {
-      await this.userManager.signinRedirectCallback();
-      window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+      try {
+        await this.userManager.signinRedirectCallback();
+      } catch (error) {
+        if (error instanceof Error && /no matching state found in storage/i.test(error.message)) {
+          throw new Error("Sign-in state was not found. Start sign-in again from this same tab and app address.");
+        }
+        throw error;
+      } finally {
+        window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+      }
     }
     const user = await this.userManager.getUser();
     return Boolean(user && !user.expired && user.access_token);
@@ -40,13 +48,99 @@ class OidcHttpClubApi implements ClubApi {
     await this.userManager.signinRedirect();
   }
 
+  async signUp(): Promise<void> {
+    await this.userManager.signinRedirect({ extraQueryParams: { prompt: "login" } });
+  }
+
+  async signOut(): Promise<void> {
+    await this.userManager.removeUser();
+  }
+
+  async closeAccount(): Promise<void> {
+    await this.requestResponse("/me/close", { method: "POST" });
+  }
+
+  async getCurrentUser(): Promise<User> {
+    const response = await this.request<{ user: User }>("/me");
+    if (!response.user) throw new Error("The signed-in user could not be loaded.");
+    return response.user;
+  }
+
   async getOverview(): Promise<ClubOverview> {
-    return this.request(`/clubs/${encodeURIComponent(this.clubId)}/overview`);
+    if (!this.clubId) {
+      const clubs = await this.getMyClubs();
+      if (!clubs[0]) throw new Error("Join or create a club to continue.");
+      this.setActiveClubId(clubs[0].id);
+    }
+    try {
+      return await this.request(`/clubs/${encodeURIComponent(this.clubId)}/overview`);
+    } catch (error) {
+      if (!(error instanceof ApiResponseError) || error.status !== 404) throw error;
+      const clubs = await this.getMyClubs();
+      const fallback = clubs.find((item) => item.id !== this.clubId) ?? clubs[0];
+      if (!fallback) throw error;
+      this.setActiveClubId(fallback.id);
+      return this.request(`/clubs/${encodeURIComponent(this.clubId)}/overview`);
+    }
   }
 
   async getMyClubs(): Promise<UserClubSummary[]> {
     const response = await this.request<{ clubs: UserClubSummary[] }>("/me/clubs");
     return response.clubs;
+  }
+
+  async searchClubs(query: string): Promise<ClubDiscoverySummary[]> {
+    const response = await this.request<{ clubs: ClubDiscoverySummary[] }>(`/clubs/discovery?q=${encodeURIComponent(query)}`);
+    return response.clubs;
+  }
+
+  async requestMembership(clubId: string): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(clubId)}/membership`, { method: "POST" });
+    return response.membership;
+  }
+
+  async getMembershipRequests(): Promise<MembershipRequestView[]> {
+    const response = await this.request<{ requests: MembershipRequestView[] }>(`/clubs/${encodeURIComponent(this.clubId)}/membership-requests`);
+    return response.requests;
+  }
+
+  async approveMembership(userId: string): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(this.clubId)}/membership-requests/${encodeURIComponent(userId)}/approve`, { method: "POST" });
+    return response.membership;
+  }
+
+  async rejectMembership(userId: string): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(this.clubId)}/membership-requests/${encodeURIComponent(userId)}/reject`, { method: "POST" });
+    return response.membership;
+  }
+
+  async leaveClub(): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(this.clubId)}/leave`, { method: "POST" });
+    return response.membership;
+  }
+
+  async removeMember(userId: string): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(this.clubId)}/members/${encodeURIComponent(userId)}/remove`, { method: "POST" });
+    return response.membership;
+  }
+
+  async updateMembershipRole(userId: string, role: "admin" | "member"): Promise<MembershipActionResult> {
+    const response = await this.request<{ membership: MembershipActionResult }>(`/clubs/${encodeURIComponent(this.clubId)}/members/${encodeURIComponent(userId)}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    });
+    return response.membership;
+  }
+
+  async closeClub(): Promise<void> {
+    await this.requestResponse(`/clubs/${encodeURIComponent(this.clubId)}/close`, { method: "POST" });
+  }
+
+  async transferOwnership(newOwnerUserId: string): Promise<void> {
+    await this.requestResponse(`/clubs/${encodeURIComponent(this.clubId)}/transfer-ownership`, {
+      method: "POST",
+      body: JSON.stringify({ newOwnerUserId }),
+    });
   }
 
   setActiveClubId(clubId: string): void {
@@ -89,7 +183,7 @@ class OidcHttpClubApi implements ClubApi {
     });
   }
 
-  async updateContribution(contributionId: string, input: CreateContributionInput): Promise<Contribution> {
+  async updateContribution(contributionId: string, input: CreateContributionInput): Promise<UpdateContributionResult> {
     return this.request(`/clubs/${encodeURIComponent(this.clubId)}/contributions/${encodeURIComponent(contributionId)}`, {
       method: "PATCH",
       body: JSON.stringify(input),
@@ -133,16 +227,30 @@ class UnconfiguredClubApi implements ClubApi {
 
   async initialize(): Promise<boolean> { return false; }
   async signIn(): Promise<void> {
-    throw new Error("Configure the OIDC authority, client ID, and club ID to enable sign-in.");
+    throw new Error("Configure the OIDC authority and client ID to enable sign-in.");
   }
+  async signUp(): Promise<void> { throw new Error("Configure the OIDC authority and client ID to enable account creation."); }
+  async signOut(): Promise<void> { throw new Error("OIDC is not configured."); }
+  async closeAccount(): Promise<void> { throw new Error("OIDC is not configured."); }
+  async getCurrentUser(): Promise<User> { throw new Error("OIDC is not configured."); }
   async getOverview(): Promise<ClubOverview> { throw new Error("OIDC is not configured."); }
   async getMyClubs(): Promise<UserClubSummary[]> { throw new Error("OIDC is not configured."); }
+  async searchClubs(): Promise<ClubDiscoverySummary[]> { throw new Error("OIDC is not configured."); }
+  async requestMembership(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async getMembershipRequests(): Promise<MembershipRequestView[]> { throw new Error("OIDC is not configured."); }
+  async approveMembership(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async rejectMembership(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async leaveClub(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async removeMember(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async updateMembershipRole(): Promise<MembershipActionResult> { throw new Error("OIDC is not configured."); }
+  async closeClub(): Promise<void> { throw new Error("OIDC is not configured."); }
+  async transferOwnership(): Promise<void> { throw new Error("OIDC is not configured."); }
   setActiveClubId(): void { throw new Error("OIDC is not configured."); }
   async createClub(): Promise<ClubOverview> { throw new Error("OIDC is not configured."); }
   async updateClubSettings(): Promise<Club> { throw new Error("OIDC is not configured."); }
   async getTicketDrawingOptions(): Promise<TicketDrawingOption[]> { throw new Error("OIDC is not configured."); }
   async createContribution(): Promise<Contribution> { throw new Error("OIDC is not configured."); }
-  async updateContribution(): Promise<Contribution> { throw new Error("OIDC is not configured."); }
+  async updateContribution(): Promise<UpdateContributionResult> { throw new Error("OIDC is not configured."); }
   async getContributionPhoto(): Promise<Blob> { throw new Error("OIDC is not configured."); }
 }
 
@@ -154,9 +262,9 @@ export function createClubApi(): ClubApi {
   const authority = import.meta.env.VITE_OIDC_AUTHORITY?.trim();
   const clientId = import.meta.env.VITE_OIDC_CLIENT_ID?.trim();
   const configuredClubId = import.meta.env.VITE_CLUB_ID?.trim();
-  let clubId = configuredClubId;
-  try { clubId = window.sessionStorage.getItem("the-club.active-club-id")?.trim() || configuredClubId; } catch {}
-  if (!authority || !clientId || !clubId) {
+  let clubId = configuredClubId ?? "";
+  try { clubId = window.sessionStorage.getItem("the-club.active-club-id")?.trim() || clubId; } catch {}
+  if (!authority || !clientId) {
     return new UnconfiguredClubApi();
   }
 

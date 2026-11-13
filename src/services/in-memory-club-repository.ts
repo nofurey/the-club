@@ -75,6 +75,14 @@ export class InMemoryClubRepository implements ClubRepository {
     return false;
   }
 
+  async hasPendingPayoutForUserInClub(): Promise<boolean> {
+    return false;
+  }
+
+  async hasCutoffCalculationInProgress(): Promise<boolean> {
+    return false;
+  }
+
   async hasIncompletePayouts(clubId: string): Promise<boolean> {
     return false;
   }

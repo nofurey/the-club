@@ -7,6 +7,12 @@ export interface OidcIdentity {
   displayName: string;
 }
 
+export class OidcEmailVerificationRequiredError extends Error {
+  constructor() {
+    super("Verify your email address with your identity provider, then sign out and sign in again.");
+  }
+}
+
 export interface OidcVerifierOptions {
   issuer: string;
   audience: string;
@@ -72,7 +78,10 @@ export function createOidcTokenVerifier({ issuer, audience, jwksUrl, userinfoUrl
       }
     }
 
-    if (!subject || !email || !emailVerified) {
+    if (!emailVerified) {
+      throw new OidcEmailVerificationRequiredError();
+    }
+    if (!subject || !email) {
       throw new Error("OIDC token and UserInfo must identify the user and include a verified email.");
     }
 

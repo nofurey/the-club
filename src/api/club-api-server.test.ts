@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Club, Contribution, Drawing, User } from "../domain";
-import type { ClubOverview, CreateClubRequest, UpdateClubSettingsRequest } from "./contracts";
+import type { ClubOverview, CreateClubRequest, MembershipActionResult, UpdateClubSettingsRequest } from "./contracts";
 import type { ClubApiRepository, ClubApiServerOptions } from "./club-api-server";
 import { buildClubApiServer } from "./club-api-server";
+import { OidcEmailVerificationRequiredError } from "./oidc-auth";
 
 const user: User = {
   id: "b1000000-0000-4000-8000-000000000001",
@@ -52,10 +53,15 @@ const club: Club = {
   closedAt: null,
 };
 
-function createRepository(): ClubApiRepository & { createdBy: string | null; updatedBy: string | null } {
+function createRepository(): ClubApiRepository & { createdBy: string | null; updatedBy: string | null; membershipRequestedBy: string | null; accountClosedBy: string | null; clubClosedBy: string | null; ownershipTransferredBy: string | null; ownershipTarget: string | null } {
   return {
     createdBy: null,
     updatedBy: null,
+    membershipRequestedBy: null,
+    accountClosedBy: null,
+    clubClosedBy: null,
+    ownershipTransferredBy: null,
+    ownershipTarget: null,
     async provisionOidcUser(identity) {
       assert.equal(identity.emailVerified, true);
       return user;
@@ -63,6 +69,25 @@ function createRepository(): ClubApiRepository & { createdBy: string | null; upd
     async listUserClubs(userId) {
       return userId === user.id ? [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" }] : [];
     },
+    async closeAccount(userId) { this.accountClosedBy = userId; },
+    async closeClub(userId) { this.clubClosedBy = userId; },
+    async transferClubOwnership(userId, _clubId, newOwnerUserId) {
+      this.ownershipTransferredBy = userId;
+      this.ownershipTarget = newOwnerUserId;
+    },
+    async searchClubs() {
+      return [{ id: club.id, name: club.name, visibility: "private", membershipStatus: null }];
+    },
+    async requestMembership(userId) {
+      this.membershipRequestedBy = userId;
+      return { membershipId: "b4000000-0000-4000-8000-000000000001", userId, role: "member", status: "pending" };
+    },
+    async listMembershipRequests() { return []; },
+    async approveMembership(): Promise<MembershipActionResult> { throw new Error("not implemented"); },
+    async rejectMembership(): Promise<MembershipActionResult> { throw new Error("not implemented"); },
+    async leaveClub(): Promise<MembershipActionResult> { throw new Error("not implemented"); },
+    async removeMember(): Promise<MembershipActionResult> { throw new Error("not implemented"); },
+    async updateMembershipRole(): Promise<MembershipActionResult> { throw new Error("not implemented"); },
     async updateClubSettings(userId, clubId, input) {
       return userId === user.id && clubId === club.id ? { ...club, ...input } : null;
     },
@@ -83,7 +108,7 @@ function createRepository(): ClubApiRepository & { createdBy: string | null; upd
       assert.equal(clubId, contribution.clubId);
       assert.equal(contributionId, contribution.id);
       this.updatedBy = userId;
-      return { ...contribution, version: contribution.version + 1 };
+      return { contribution: { ...contribution, version: contribution.version + 1 }, recalculationTargets: [] };
     },
   };
 }
@@ -128,6 +153,24 @@ test("requires a bearer token before returning the authenticated user", async (t
   assert.equal(valid.json().user.id, user.id);
 });
 
+test("explains when a valid identity has not verified its email", async (t) => {
+  const server = await buildClubApiServer({
+    repository: createRepository(),
+    webOrigin: "https://club.example.test",
+    verifyToken: async () => { throw new OidcEmailVerificationRequiredError(); },
+  });
+  t.after(() => server.close());
+
+  const response = await server.inject({
+    method: "GET",
+    url: "/api/v1/me",
+    headers: { authorization: "Bearer valid-token" },
+  });
+  assert.equal(response.statusCode, 403);
+  assert.equal(response.json().error, "email_verification_required");
+  assert.match(response.json().message, /verify your email/i);
+});
+
 test("lists the authenticated member's clubs and updates settings through the API", async (t) => {
   const { server, repository } = await createServer();
   t.after(() => server.close());
@@ -144,6 +187,66 @@ test("lists the authenticated member's clubs and updates settings through the AP
   assert.equal(updated.json().club.visibility, "public");
   repository.updateClubSettings = async () => null;
   assert.equal((await server.inject({ method: "PATCH", url, headers: { authorization: "Bearer valid-token" }, payload })).statusCode, 404);
+});
+
+test("account closure requires authentication and uses the verified actor", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+
+  assert.equal((await server.inject({ method: "POST", url: "/api/v1/me/close" })).statusCode, 401);
+  const closed = await server.inject({
+    method: "POST",
+    url: "/api/v1/me/close",
+    headers: { authorization: "Bearer valid-token" },
+    payload: { userId: "b7000000-0000-4000-8000-000000000001" },
+  });
+  assert.equal(closed.statusCode, 204);
+  assert.equal(repository.accountClosedBy, user.id);
+});
+
+test("club closure and ownership transfer use the authenticated actor", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+  const headers = { authorization: "Bearer valid-token" };
+
+  const closed = await server.inject({ method: "POST", url: `/api/v1/clubs/${club.id}/close`, headers });
+  assert.equal(closed.statusCode, 204);
+  assert.equal(repository.clubClosedBy, user.id);
+
+  const newOwnerUserId = "b7000000-0000-4000-8000-000000000001";
+  const transferred = await server.inject({
+    method: "POST",
+    url: `/api/v1/clubs/${club.id}/transfer-ownership`,
+    headers,
+    payload: { newOwnerUserId },
+  });
+  assert.equal(transferred.statusCode, 204);
+  assert.equal(repository.ownershipTransferredBy, user.id);
+  assert.equal(repository.ownershipTarget, newOwnerUserId);
+});
+
+test("discovery and membership requests require authentication and use the verified actor", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+
+  assert.equal((await server.inject({ method: "GET", url: "/api/v1/clubs/discovery?q=test" })).statusCode, 401);
+  const discovered = await server.inject({
+    method: "GET",
+    url: "/api/v1/clubs/discovery?q=test",
+    headers: { authorization: "Bearer valid-token" },
+  });
+  assert.equal(discovered.statusCode, 200);
+  assert.deepEqual(discovered.json().clubs[0], { id: club.id, name: club.name, visibility: "private", membershipStatus: null });
+
+  const joined = await server.inject({
+    method: "POST",
+    url: `/api/v1/clubs/${club.id}/membership`,
+    headers: { authorization: "Bearer valid-token" },
+    payload: { userId: "b7000000-0000-4000-8000-000000000001" },
+  });
+  assert.equal(joined.statusCode, 201);
+  assert.equal(repository.membershipRequestedBy, user.id);
+  assert.equal(joined.json().membership.userId, user.id);
 });
 
 test("creates a club for the authenticated owner and provisions its first official prices", async (t) => {
@@ -342,7 +445,7 @@ test("validates ticket edits and associates them with the authenticated owner", 
   assert.equal((await server.inject({ method: "PATCH", url, headers, payload: { ...payload, drawingCount: 0 } })).statusCode, 400);
   const updated = await server.inject({ method: "PATCH", url, headers, payload });
   assert.equal(updated.statusCode, 200);
-  assert.equal(updated.json().version, 2);
+  assert.equal(updated.json().contribution.version, 2);
   assert.equal(repository.updatedBy, user.id);
 });
 

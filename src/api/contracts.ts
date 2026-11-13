@@ -5,6 +5,10 @@ import type {
   Drawing,
   DrawingResult,
   LotteryType,
+  MembershipRole,
+  MembershipStatus,
+  PayoutType,
+  PrizeAwardStatus,
   PayoutConfiguration,
   ThresholdRule,
   User,
@@ -23,6 +27,18 @@ export interface DrawingResultView {
   result: DrawingResult | null;
   winningTicketCount: number;
   grossPrizeTotal: number;
+  payouts: DrawingPayoutView[];
+}
+
+export interface DrawingPayoutView {
+  userId: string;
+  memberName: string;
+  prizeType: string;
+  grossPrizeAmount: number;
+  shareAmount: number;
+  thresholdMet: boolean;
+  payoutType: PayoutType | null;
+  status: PrizeAwardStatus;
 }
 
 export interface ClubOverview {
@@ -87,10 +103,58 @@ export interface UserClubSummary {
   role: "creator" | "admin" | "member";
 }
 
+export type ClubDiscoverySummary =
+  | {
+      id: string;
+      name: string;
+      visibility: "private";
+      membershipStatus: MembershipStatus | null;
+    }
+  | {
+      id: string;
+      name: string;
+      visibility: "public";
+      description: string | null;
+      motto: string | null;
+      memberCount: number;
+      membershipStatus: MembershipStatus | null;
+    };
+
+export interface MembershipRequestView {
+  membershipId: string;
+  userId: string;
+  displayName: string;
+  email: string;
+  requestedAt: string;
+}
+
+export interface MembershipActionResult {
+  membershipId: string;
+  userId: string;
+  role: MembershipRole;
+  status: MembershipStatus;
+}
+
 export interface UpdateClubSettingsRequest {
   name: string;
   description: string | null;
   motto: string | null;
   visibility: "public" | "private";
   allowSearch: boolean;
+}
+
+export interface RecalculationTarget {
+  drawingId: string;
+  cutoffAt: string;
+}
+
+export interface UpdateContributionRepositoryResult {
+  contribution: Contribution;
+  recalculationTargets: RecalculationTarget[];
+}
+
+export interface UpdateContributionResult {
+  contribution: Contribution;
+  recalculatedDrawingCount: number;
+  recalculationPending: boolean;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getDrawingCountOptions, getMaxDrawings, getMaxNumberSets, getUpcomingDrawingDates } from "./drawing-schedule";
+import { getDrawingCountOptions, getDrawingCutoffAtEt, getMaxDrawings, getMaxNumberSets, getUpcomingDrawingDates } from "./drawing-schedule";
 
 test("generates two upcoming Michigan schedules with their sales cutoffs", () => {
   assert.deepEqual(getUpcomingDrawingDates(["powerball", "mega_millions"], "2026-11-13"), [
@@ -28,4 +28,10 @@ test("matches Michigan Number of Drawings options and panels per ticket", () => 
   assert.deepEqual(getDrawingCountOptions("mega_millions", 26), Array.from({ length: 26 }, (_, index) => index + 1));
   assert.deepEqual(getDrawingCountOptions("mega_millions", 0), []);
   assert.equal(getDrawingCountOptions("powerball", 30).every((count) => count === 1 || count % 5 === 0), true);
+});
+
+test("converts drawing sales cutoffs across Eastern Standard and Daylight Time", () => {
+  assert.equal(getDrawingCutoffAtEt("2026-11-13", "22:45:00"), "2026-11-14T03:45:00.000Z");
+  assert.equal(getDrawingCutoffAtEt("2026-07-14", "22:45:00"), "2026-07-15T02:45:00.000Z");
+  assert.throws(() => getDrawingCutoffAtEt("2026-02-30", "22:45:00"), /invalid/i);
 });

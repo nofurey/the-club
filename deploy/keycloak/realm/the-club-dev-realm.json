@@ -3,7 +3,7 @@
   "enabled": true,
   "displayName": "The Club Local Development",
   "sslRequired": "external",
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
   "resetPasswordAllowed": true,
