@@ -267,7 +267,7 @@ export class MichiganLotteryGraphqlProvider implements OfficialLotteryProvider {
     const prizeRows = this.parsePrizeRows(this.asText(prizeTable.body));
     const prizeTiers = this.toPrizeTiers(prizeRows);
     const ticketCostText = this.stripHtml(this.asText(gameDetails.body));
-    const ticketPriceMatch = ticketCostText.match(/Ticket\s+Cost:\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i);
+    const ticketPriceMatch = ticketCostText.match(/Ticket\s+Cost:\s*(?:__|\*\*)?\s*\$\s*([\d,]+(?:\.\d{1,2})?)/i);
     const priceSnapshot: Record<string, unknown> = {
       numberRules: {
         mainNumberCount: Number(numberMatch[1]),

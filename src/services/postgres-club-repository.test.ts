@@ -394,7 +394,7 @@ test("Postgres repository deduplicates snapshots and invalidates awards when off
     [drawingId, "powerball", "2026-11-07", "MI", "21:58:00", "pending", now]
   );
 
-  const snapshot: CalculationSnapshot = {
+  let snapshot: CalculationSnapshot = {
     id: "snapshot-1",
     drawingId,
     clubId,
@@ -445,6 +445,17 @@ test("Postgres repository deduplicates snapshots and invalidates awards when off
   assert.equal(storedDrawing?.drawingSizeSourceUrl, drawingSize.sourceUrl);
   assert.equal(storedDrawing?.drawingSizeSourceSha256, drawingSize.sourceSha256);
 
+  const parserCorrection = {
+    ...snapshot,
+    priceSnapshot: { ...snapshot.priceSnapshot, ticketPrice: 5 },
+    capturedAt: "2026-11-08T03:30:00.000Z",
+  };
+  const refreshedNormalization = await repo.storeOfficialData(parserCorrection, result, now, drawingSize);
+  assert.equal(refreshedNormalization.snapshot.id, first.snapshot.id);
+  assert.equal(refreshedNormalization.snapshot.priceSnapshot.ticketPrice, 5);
+  assert.equal(refreshedNormalization.rulesChanged, true);
+  snapshot = parserCorrection;
+
   const award: PrizeAward = {
     id: "award-1",
     drawingResultId: first.result.id,
@@ -473,6 +484,15 @@ test("Postgres repository deduplicates snapshots and invalidates awards when off
   assert.equal(repeated.resultChanged, false);
   assert.equal(repeated.drawingSizeUpdated, false);
   assert.equal(repeated.result.status, "calculated");
+  const completedCalculation = await repo.storeOfficialData(
+    { ...snapshot, priceSnapshot: { ...snapshot.priceSnapshot, ticketPrice: 6 } },
+    result,
+    now,
+    drawingSize
+  );
+  assert.equal(completedCalculation.snapshot.priceSnapshot.ticketPrice, 5);
+  assert.equal(completedCalculation.rulesChanged, false);
+  assert.equal(completedCalculation.result.status, "calculated");
   const { rows: retainedAwards } = await client.query("SELECT id FROM prize_awards WHERE drawing_result_id = $1", [first.result.id]);
   assert.equal(retainedAwards.length, 1);
 

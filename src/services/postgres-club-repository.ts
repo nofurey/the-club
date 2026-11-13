@@ -224,7 +224,6 @@ export class PostgresClubRepository implements ClubRepository {
       const previousSnapshot = latestSnapshotRows[0]
         ? PostgresClubRepository.toCalculationSnapshot(latestSnapshotRows[0])
         : null;
-      const rulesChanged = !previousSnapshot || !PostgresClubRepository.sameRules(previousSnapshot, snapshot);
 
       const { rows: previousResultRows } = await this.client.query(
         "SELECT * FROM drawing_results WHERE drawing_id = $1 AND club_id = $2 LIMIT 1",
@@ -236,13 +235,30 @@ export class PostgresClubRepository implements ClubRepository {
       const resultChanged = !PostgresClubRepository.sameOfficialResult(previousResult, result);
 
       let storedSnapshot: CalculationSnapshot;
+      let rulesChanged = false;
       const { rows: sameSourceRows } = await this.client.query(
         "SELECT * FROM calculation_snapshots WHERE drawing_id = $1 AND club_id = $2 AND source_sha256 = $3 LIMIT 1",
         [snapshot.drawingId, snapshot.clubId, snapshot.sourceSha256]
       );
       if (sameSourceRows[0]) {
-        storedSnapshot = PostgresClubRepository.toCalculationSnapshot(sameSourceRows[0]);
+        const sameSourceSnapshot = PostgresClubRepository.toCalculationSnapshot(sameSourceRows[0]);
+        const normalizedRulesChanged = !PostgresClubRepository.sameRules(sameSourceSnapshot, snapshot);
+        const calculationIsComplete = previousResult?.status === "calculated" || previousResult?.status === "recalculated";
+        if (normalizedRulesChanged && !calculationIsComplete) {
+          const { rows } = await this.client.query(
+            `UPDATE calculation_snapshots
+             SET rules_version = $2, price_snapshot = $3::jsonb, captured_at = $4
+             WHERE id = $1
+             RETURNING *`,
+            [sameSourceSnapshot.id, snapshot.rulesVersion, JSON.stringify(snapshot.priceSnapshot), snapshot.capturedAt]
+          );
+          storedSnapshot = PostgresClubRepository.toCalculationSnapshot(rows[0]);
+          rulesChanged = true;
+        } else {
+          storedSnapshot = sameSourceSnapshot;
+        }
       } else {
+        rulesChanged = !previousSnapshot || !PostgresClubRepository.sameRules(previousSnapshot, snapshot);
         const { rows } = await this.client.query(
           `
             INSERT INTO calculation_snapshots (

@@ -3,6 +3,9 @@ import { Pool } from "pg";
 import { buildClubApiServer } from "./club-api-server";
 import { createOidcTokenVerifier } from "./oidc-auth";
 import { PostgresClubApiRepository } from "./postgres-club-api-repository";
+import { MichiganLotteryGraphqlProvider } from "../services/michigan-lottery-graphql-provider";
+import { OfficialLotteryDataService } from "../services/official-lottery-data-service";
+import { PostgresClubRepository } from "../services/postgres-club-repository";
 import { wrapPgLikeClient } from "../services/postgres-client";
 
 function requiredEnvironment(name: string): string {
@@ -29,9 +32,28 @@ async function main(): Promise<void> {
   }
 
   const pool = new Pool({ connectionString });
-  const repository = new PostgresClubApiRepository(wrapPgLikeClient(pool));
+  const database = wrapPgLikeClient(pool);
+  const repository = new PostgresClubApiRepository(database);
+  const officialProvider = new MichiganLotteryGraphqlProvider();
   const server = await buildClubApiServer({
     repository,
+    prepareTicketDrawings: async (userId, clubId, drawings) => {
+      const outcomes = await Promise.allSettled(drawings.map(async (drawing) => {
+        const connection = await pool.connect();
+        try {
+          const officialData = new OfficialLotteryDataService(
+            new PostgresClubRepository(wrapPgLikeClient(connection)),
+            officialProvider
+          );
+          return await officialData.refreshDrawing({ drawingId: drawing.id, clubId });
+        } finally {
+          connection.release();
+        }
+      }));
+      if (outcomes.some((outcome) => outcome.status === "rejected")) {
+        throw new Error("Official data refresh failed for one or more upcoming drawings.");
+      }
+    },
     verifyToken: createOidcTokenVerifier({
       issuer,
       audience,

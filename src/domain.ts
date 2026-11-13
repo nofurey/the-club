@@ -105,6 +105,7 @@ export interface Contribution {
   numberSets: NumberSet[] | Record<string, unknown>[];
   ticketImageUrl?: string | null;
   hasTicketPhoto?: boolean;
+  canEdit?: boolean;
   costUsd: number;
   status: ContributionStatus;
   createdAt: string;

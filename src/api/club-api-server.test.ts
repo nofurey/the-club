@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Contribution, User } from "../domain";
-import type { ClubApiRepository } from "./club-api-server";
+import type { Club, Contribution, Drawing, User } from "../domain";
+import type { ClubOverview, CreateClubRequest, UpdateClubSettingsRequest } from "./contracts";
+import type { ClubApiRepository, ClubApiServerOptions } from "./club-api-server";
 import { buildClubApiServer } from "./club-api-server";
 
 const user: User = {
@@ -34,14 +35,42 @@ const contribution: Contribution = {
   version: 1,
 };
 
-function createRepository(): ClubApiRepository & { createdBy: string | null } {
+const club: Club = {
+  id: contribution.clubId,
+  name: "Test Club",
+  description: null,
+  motto: null,
+  visibility: "private",
+  ownerUserId: user.id,
+  status: "active",
+  payoutConfigurationId: "b5000000-0000-4000-8000-000000000001",
+  thresholdRuleId: "b6000000-0000-4000-8000-000000000001",
+  supportedLotteries: ["powerball"],
+  allowSearch: false,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  closedAt: null,
+};
+
+function createRepository(): ClubApiRepository & { createdBy: string | null; updatedBy: string | null } {
   return {
     createdBy: null,
+    updatedBy: null,
     async provisionOidcUser(identity) {
       assert.equal(identity.emailVerified, true);
       return user;
     },
+    async listUserClubs(userId) {
+      return userId === user.id ? [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" }] : [];
+    },
+    async updateClubSettings(userId, clubId, input) {
+      return userId === user.id && clubId === club.id ? { ...club, ...input } : null;
+    },
+    async createClub() { return { id: contribution.clubId }; },
     async getClubOverview() { return null; },
+    async ensureUpcomingDrawings(userId) {
+      return userId === user.id ? [] : null;
+    },
     async getTicketDrawingOptions(userId) {
       return userId === user.id ? [] : null;
     },
@@ -50,13 +79,20 @@ function createRepository(): ClubApiRepository & { createdBy: string | null } {
       this.createdBy = userId;
       return contribution;
     },
+    async updateContribution(userId, clubId, contributionId) {
+      assert.equal(clubId, contribution.clubId);
+      assert.equal(contributionId, contribution.id);
+      this.updatedBy = userId;
+      return { ...contribution, version: contribution.version + 1 };
+    },
   };
 }
 
-async function createServer(repository = createRepository()) {
+async function createServer(repository = createRepository(), prepareTicketDrawings?: ClubApiServerOptions["prepareTicketDrawings"]) {
   const server = await buildClubApiServer({
     repository,
     webOrigin: "https://club.example.test",
+    prepareTicketDrawings,
     verifyToken: async (token) => {
       if (token !== "valid-token") throw new Error("invalid token");
       return {
@@ -92,6 +128,155 @@ test("requires a bearer token before returning the authenticated user", async (t
   assert.equal(valid.json().user.id, user.id);
 });
 
+test("lists the authenticated member's clubs and updates settings through the API", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+  assert.equal((await server.inject({ method: "GET", url: "/api/v1/me/clubs" })).statusCode, 401);
+  const listed = await server.inject({ method: "GET", url: "/api/v1/me/clubs", headers: { authorization: "Bearer valid-token" } });
+  assert.equal(listed.statusCode, 200);
+  assert.deepEqual(listed.json().clubs.map((item: { id: string }) => item.id), [club.id]);
+
+  const payload: UpdateClubSettingsRequest = { name: "Updated Club", description: "Updated", motto: "Together", visibility: "public", allowSearch: true };
+  const url = `/api/v1/clubs/${club.id}/settings`;
+  const updated = await server.inject({ method: "PATCH", url, headers: { authorization: "Bearer valid-token" }, payload });
+  assert.equal(updated.statusCode, 200);
+  assert.equal(updated.json().club.name, payload.name);
+  assert.equal(updated.json().club.visibility, "public");
+  repository.updateClubSettings = async () => null;
+  assert.equal((await server.inject({ method: "PATCH", url, headers: { authorization: "Bearer valid-token" }, payload })).statusCode, 404);
+});
+
+test("creates a club for the authenticated owner and provisions its first official prices", async (t) => {
+  const { repository } = await createServer();
+  const drawing: Drawing = {
+    id: "b4000000-0000-4000-8000-000000000001",
+    lottery: "powerball",
+    drawingDate: "2026-11-14",
+    state: "MI",
+    cutoffTimeEt: "21:58:00",
+    status: "pending",
+    createdAt: "2026-11-13T00:00:00.000Z",
+  };
+  let createdInput: CreateClubRequest | null = null;
+  repository.createClub = async (userId, input) => {
+    assert.equal(userId, user.id);
+    createdInput = input;
+    return { id: contribution.clubId };
+  };
+  repository.ensureUpcomingDrawings = async () => [drawing];
+  let optionReads = 0;
+  repository.getTicketDrawingOptions = async () => {
+    optionReads++;
+    return [{
+      lottery: "powerball",
+      drawingDate: drawing.drawingDate,
+      maxDrawingCount: 1,
+      drawingCountOptions: [1],
+      maxNumberSets: 10,
+      ticketPrice: optionReads === 1 ? null : 2,
+      numberRules: optionReads === 1 ? null : { mainNumberCount: 5, mainNumberMin: 1, mainNumberMax: 69, bonusNumberMin: 1, bonusNumberMax: 26 },
+    }];
+  };
+  const overview = { club: { id: contribution.clubId } } as ClubOverview;
+  repository.getClubOverview = async () => overview;
+  let prepared = false;
+  const server = await buildClubApiServer({
+    repository,
+    webOrigin: "https://club.example.test",
+    verifyToken: async () => ({ subject: user.authSubject!, email: user.email, emailVerified: true, displayName: user.displayName }),
+    prepareTicketDrawings: async (userId, clubId, drawings) => {
+      assert.equal(userId, user.id);
+      assert.equal(clubId, contribution.clubId);
+      assert.deepEqual(drawings.map((item) => item.id), [drawing.id]);
+      prepared = true;
+    },
+  });
+  t.after(() => server.close());
+
+  const invalid = await server.inject({
+    method: "POST",
+    url: "/api/v1/clubs",
+    headers: { authorization: "Bearer valid-token" },
+    payload: { name: "Missing settings" },
+  });
+  const created = await server.inject({
+    method: "POST",
+    url: "/api/v1/clubs",
+    headers: { authorization: "Bearer valid-token" },
+    payload: {
+      name: "New club",
+      visibility: "private",
+      supportedLotteries: ["powerball"],
+      payoutConfiguration: { type: "equal_shares" },
+      thresholdRule: { thresholdAmount: 100, method: "pooled" },
+    },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(created.statusCode, 201);
+  assert.equal((createdInput as CreateClubRequest | null)?.name, "New club");
+  assert.equal(prepared, true);
+  assert.equal(optionReads, 1);
+  const readyOptions = await repository.getTicketDrawingOptions(user.id, contribution.clubId);
+  assert.equal(readyOptions?.[0].ticketPrice, 2);
+  assert.equal(created.json().club.id, contribution.clubId);
+});
+
+test("prepares official prices for missing upcoming drawings before returning options", async (t) => {
+  const { repository } = await createServer();
+  const drawing: Drawing = {
+    id: "b4000000-0000-4000-8000-000000000001",
+    lottery: "powerball",
+    drawingDate: "2026-11-14",
+    state: "MI",
+    cutoffTimeEt: "21:58:00",
+    status: "pending",
+    createdAt: "2026-11-13T00:00:00.000Z",
+  };
+  repository.ensureUpcomingDrawings = async () => [drawing];
+  let optionReads = 0;
+  repository.getTicketDrawingOptions = async () => {
+    optionReads++;
+    return [{
+      lottery: "powerball",
+      drawingDate: drawing.drawingDate,
+      maxDrawingCount: 1,
+      drawingCountOptions: [1],
+      maxNumberSets: 10,
+      ticketPrice: optionReads === 1 ? null : 2,
+      numberRules: optionReads === 1 ? null : {
+        mainNumberCount: 5,
+        mainNumberMin: 1,
+        mainNumberMax: 69,
+        bonusNumberMin: 1,
+        bonusNumberMax: 26,
+      },
+    }];
+  };
+  let prepared = false;
+  const server = await buildClubApiServer({
+    repository,
+    webOrigin: "https://club.example.test",
+    verifyToken: async () => ({ subject: user.authSubject!, email: user.email, emailVerified: true, displayName: user.displayName }),
+    prepareTicketDrawings: async (userId, clubId, drawings) => {
+      assert.equal(userId, user.id);
+      assert.equal(clubId, contribution.clubId);
+      assert.deepEqual(drawings.map((item) => item.id), [drawing.id]);
+      prepared = true;
+    },
+  });
+  t.after(() => server.close());
+
+  const response = await server.inject({
+    method: "GET",
+    url: `/api/v1/clubs/${contribution.clubId}/ticket-drawings`,
+    headers: { authorization: "Bearer valid-token" },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(prepared, true);
+  assert.equal(optionReads, 2);
+  assert.equal(response.json()[0].ticketPrice, 2);
+});
+
 test("ticket drawing options require authentication and use the authenticated user", async (t) => {
   const { server, repository } = await createServer();
   t.after(() => server.close());
@@ -120,11 +305,45 @@ test("validates contribution input and associates creation with the authenticate
     headers,
     payload: { lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 1, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
   });
+  const invalidPowerballCount = await server.inject({
+    method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
+    payload: { lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 2, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+  });
+  const validMegaCount = await server.inject({
+    method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
+    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 26, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+  });
+  const invalidMegaCount = await server.inject({
+    method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
+    payload: { lottery: "mega_millions", drawingDate: "2026-11-10", drawingCount: 27, numbers: [1, 2, 3, 4, 5], bonusNumber: 6 },
+  });
+  const tooManyPanels = await server.inject({
+    method: "POST", url: `/api/v1/clubs/${clubId}/contributions`, headers,
+    payload: { lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 1, numberSets: Array.from({ length: 11 }, (_, index) => ({ numbers: [1, 2, 3, 4, index + 5], bonusNumber: 6 })) },
+  });
 
   assert.equal(invalid.statusCode, 400);
   assert.equal(valid.statusCode, 201);
+  assert.equal(invalidPowerballCount.statusCode, 400);
+  assert.equal(validMegaCount.statusCode, 201);
+  assert.equal(invalidMegaCount.statusCode, 400);
+  assert.equal(tooManyPanels.statusCode, 400);
   assert.equal(valid.json().userId, user.id);
   assert.equal(repository.createdBy, user.id);
+});
+
+test("validates ticket edits and associates them with the authenticated owner", async (t) => {
+  const { server, repository } = await createServer();
+  t.after(() => server.close());
+  const url = `/api/v1/clubs/${contribution.clubId}/contributions/${contribution.id}`;
+  const headers = { authorization: "Bearer valid-token" };
+  const payload = { lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 1, numberSets: [{ numbers: [1, 2, 3, 4, 5], bonusNumber: 6 }] };
+  assert.equal((await server.inject({ method: "PATCH", url, payload })).statusCode, 401);
+  assert.equal((await server.inject({ method: "PATCH", url, headers, payload: { ...payload, drawingCount: 0 } })).statusCode, 400);
+  const updated = await server.inject({ method: "PATCH", url, headers, payload });
+  assert.equal(updated.statusCode, 200);
+  assert.equal(updated.json().version, 2);
+  assert.equal(repository.updatedBy, user.id);
 });
 
 test("accepts multiple plays and rejects an invalid play", async (t) => {
@@ -141,6 +360,8 @@ test("accepts multiple plays and rejects an invalid play", async (t) => {
   };
   assert.equal((await server.inject({ method: "POST", url, headers, payload })).statusCode, 201);
   payload.numberSets[1].numbers = [7, 7, 9, 10, 11];
+  assert.equal((await server.inject({ method: "POST", url, headers, payload })).statusCode, 400);
+  payload.numberSets = Array.from({ length: 11 }, (_, index) => ({ numbers: [1, 2, 3, 4, index + 5], bonusNumber: 6 }));
   assert.equal((await server.inject({ method: "POST", url, headers, payload })).statusCode, 400);
 });
 

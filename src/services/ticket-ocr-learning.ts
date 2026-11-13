@@ -20,7 +20,7 @@ export function emptyOcrModel(): OcrCorrectionModel {
 }
 
 function validPlays(value: unknown): value is TicketNumberSetInput[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 20) return false;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 10) return false;
   return value.every((play) => play && typeof play === "object" && Array.isArray(play.numbers) && play.numbers.length === 5 &&
     new Set(play.numbers).size === 5 && play.numbers.every((number: unknown) => Number.isInteger(number) && (number as number) >= 1 && (number as number) <= 70) &&
     Number.isInteger(play.bonusNumber) && play.bonusNumber >= 1 && play.bonusNumber <= 26);
@@ -86,7 +86,7 @@ export function hasLearnableOcrRows(text: string): boolean {
 }
 
 export function learnOcrCorrections(model: OcrCorrectionModel, text: string, confirmed: TicketNumberSetInput[], photoHash: string): OcrCorrectionModel {
-  if (!photoHash || model.photoHashes.includes(photoHash) || confirmed.length === 0 || confirmed.length > 20) return model;
+  if (!photoHash || model.photoHashes.includes(photoHash) || confirmed.length === 0 || confirmed.length > 10) return model;
   const rows = text.split(/\r?\n/).map(readRow).filter((row): row is NonNullable<typeof row> => row !== null);
   if (rows.length !== confirmed.length || rows.some((row, index) => row.label !== String.fromCharCode(65 + index))) return model;
 

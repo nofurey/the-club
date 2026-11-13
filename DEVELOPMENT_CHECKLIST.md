@@ -12,7 +12,7 @@
 - [x] Fetch Michigan Lottery rules and results through its public GraphQL endpoint; retain source documents and hashes.
 - [x] Fetch Powerball and Mega Millions next-drawing jackpot estimates and cash values; store them on the matching drawing with source metadata.
 - [x] Make official-data refreshes idempotent and clear stale awards when normalized rules or results change.
-- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (50 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
+- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (58 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
 - [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations, OIDC user linking, API overview/contribution operations, and refresh target discovery ran in a temporary schema).
 - [x] Fix PostgreSQL enum parameter inference in the drawing-status update.
 - [x] Smoke-test both jackpot/cash endpoints against their live next-drawing dates.
@@ -37,20 +37,25 @@
 - [x] Sign in with a verified Keycloak user and receive the authenticated club overview in the browser.
 - [x] Verify authenticated overview/contribution persistence against local PostgreSQL.
 - [x] Populate ticket entry from member-scoped drawing schedules and saved official pricing and number rules; show unavailable pricing explicitly.
+- [x] Parse Markdown-formatted Michigan Lottery ticket prices and refresh corrected rules on uncalculated snapshots.
+- [x] Seed upcoming schedules and fetch official rules and prices before a club's first contribution.
+- [x] Add authenticated club creation and switch the current browser session to the created club.
+- [x] Add active club listing, session switching, and creator/admin-only basic settings edits.
 - [x] Add optional ticket photo upload and member-only viewing, backed by migration 005 and PostgreSQL storage.
 - [x] Support multiple plays per ticket with per-play pricing and rules-aware number selection.
+- [x] Match Michigan Lottery ticket limits: 10 panels, Powerball 1/5-step draws up to 30, and Mega Millions draws up to 26.
 - [x] Add locally executed ticket-photo OCR with editable suggestions and required user confirmation.
 - [x] Add opt-in, browser-local OCR correction learning and a photo-storage disclaimer.
+- [x] Allow members to edit their own submitted tickets before the first drawing cutoff, with atomic audit records.
 - [x] Distinguish pending results, pending calculations, calculated results, and recalculations in the results view.
 - [x] Replace implicit demo mode with authenticated HTTP by default; keep demo preview explicit for development.
 - [x] Build the frontend production bundle and audit production dependencies (0 vulnerabilities).
 
 ## Remaining
 
-- [ ] Populate future drawing schedules and official pricing for clubs before their first contribution.
-- [ ] Add contribution editing and audited recalculation for past or changed entries.
+- [ ] Recalculate and audit tickets changed after a drawing cutoff or posted result.
 - [ ] Run drawing calculations after official results are refreshed and expose awards and payout allocations.
-- [ ] Add club creation, discovery, membership management, and club switching to the authenticated API and frontend.
+- [ ] Add club discovery, join requests, and membership management to the authenticated API and frontend.
 - [ ] Monitor the site-owned API response formats and confirm permitted use before production reliance; these endpoints are not documented public APIs.
 - [ ] Define retention and cleanup for raw source documents and historical calculation artifacts.
 - [ ] Add notification delivery and recalculation notices after payout calculations complete.

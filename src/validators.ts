@@ -121,6 +121,7 @@ export const ContributionSchema = z.object({
   numberSets: z.array(z.unknown()).min(1),
   ticketImageUrl: z.string().url().nullable().optional(),
   hasTicketPhoto: z.boolean().optional(),
+  canEdit: z.boolean().optional(),
   costUsd: z.number().positive(),
   status: ContributionStatusSchema.default("submitted"),
   createdAt: z.string().datetime(),

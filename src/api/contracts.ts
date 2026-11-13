@@ -52,6 +52,8 @@ export interface TicketDrawingOption {
   lottery: LotteryType;
   drawingDate: string;
   maxDrawingCount: number;
+  drawingCountOptions: number[];
+  maxNumberSets: number;
   ticketPrice: number | null;
   numberRules: {
     mainNumberCount: number;
@@ -60,4 +62,35 @@ export interface TicketDrawingOption {
     bonusNumberMin: number;
     bonusNumberMax: number;
   } | null;
+}
+
+export interface CreateClubRequest {
+  name: string;
+  description?: string | null;
+  motto?: string | null;
+  visibility: "public" | "private";
+  supportedLotteries: LotteryType[];
+  allowSearch?: boolean;
+  payoutConfiguration: {
+    type: "equal_shares" | "proportion_drawing_specific" | "proportion_all_drawings";
+  };
+  thresholdRule: {
+    thresholdAmount: number;
+    method: "pooled" | "individual";
+  };
+}
+
+export interface UserClubSummary {
+  id: string;
+  name: string;
+  visibility: "public" | "private";
+  role: "creator" | "admin" | "member";
+}
+
+export interface UpdateClubSettingsRequest {
+  name: string;
+  description: string | null;
+  motto: string | null;
+  visibility: "public" | "private";
+  allowSearch: boolean;
 }

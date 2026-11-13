@@ -58,6 +58,14 @@ button:disabled { cursor: wait; opacity: 0.65; }
 .wordmark-name { font-family: "Newsreader", serif; font-size: 24px; line-height: 1; }
 .wordmark-period { color: var(--citrus); }
 .club-switcher { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid rgba(228, 242, 232, 0.14); border-radius: 7px; color: inherit; background: rgba(255,255,255,0.055); text-align: left; cursor: pointer; }
+.club-switcher-wrap { position: relative; }
+.club-menu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; width: min(300px, calc(100vw - 32px)); max-height: 300px; overflow-y: auto; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: white; box-shadow: var(--shadow); }
+.club-menu-item { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; border: 0; border-radius: 4px; color: var(--ink); background: white; text-align: left; cursor: pointer; }
+.club-menu-item:hover, .club-menu-item-active { background: #f0f6f1; }
+.club-menu-item > span { min-width: 0; display: grid; gap: 4px; }
+.club-menu-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.club-menu-item small, .club-menu-empty { color: #788a80; font-size: 9px; text-transform: capitalize; }
+.club-menu-empty { display: block; padding: 12px; }
 .club-avatar { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 6px; color: var(--forest); background: #b6d7ce; font-size: 11px; font-weight: 700; }
 .club-switcher-copy, .profile-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
 .club-switcher-copy strong, .profile-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
@@ -230,6 +238,12 @@ td:first-child { color: var(--ink); }
 .lottery-option-selected { border-color: #3d7664; background: #f3f8f4; }
 .field-label { display: grid; gap: 7px; margin-bottom: 13px; color: #60736a; font-size: 10px; font-weight: 700; }
 .field-label input, .field-label select { width: 100%; min-height: 39px; padding: 0 10px; border: 1px solid var(--line-dark); border-radius: 5px; color: var(--ink); background: #fcfdfc; font-size: 11px; font-weight: 400; }
+.field-label textarea { width: 100%; min-height: 68px; resize: vertical; padding: 10px; border: 1px solid var(--line-dark); border-radius: 5px; color: var(--ink); background: #fcfdfc; font: inherit; font-weight: 400; }
+.club-lottery-fields { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); }
+.club-lottery-fields legend { padding: 0 4px; color: #60736a; font-size: 10px; font-weight: 700; }
+.club-lottery-fields label { display: flex; align-items: center; gap: 7px; color: #60736a; font-size: 11px; }
+.club-setting-toggle { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; color: #60736a; font-size: 11px; }
+.create-club-dialog { width: min(540px, 100%); }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .play-entry { border-top: 1px solid var(--line); padding-top: 8px; }
 .play-heading { display: flex; align-items: center; justify-content: space-between; min-height: 28px; color: var(--ink); font-size: 10px; }
@@ -271,6 +285,7 @@ td:first-child { color: var(--ink); }
 .cost-preview span { color: #687b71; font-size: 10px; }
 .cost-preview strong { color: var(--ink); font-family: "DM Mono", monospace; font-size: 14px; }
 .cost-preview small { grid-column: 1 / -1; color: #87958d; font-size: 8px; }
+.refresh-price-button { margin: -5px 0 12px; }
 .form-error { margin: 0 0 12px; color: #a33f31; font-size: 10px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .dialog-disclaimer { display: flex; justify-content: center; align-items: center; gap: 6px; margin: 14px 0 0; color: #8a968e; font-size: 8px; }

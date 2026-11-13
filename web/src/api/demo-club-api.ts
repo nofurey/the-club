@@ -1,4 +1,6 @@
 import type { ClubMembership, Contribution, Drawing, DrawingResult, NumberSet } from "../../../src/domain";
+import type { CreateClubRequest } from "../../../src/api/contracts";
+import { getDrawingCountOptions } from "../../../src/services/drawing-schedule";
 import type { ClubApi, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView } from "./contracts";
 
 const now = "2026-11-09T12:00:00.000Z";
@@ -161,11 +163,28 @@ export const demoClubApi: ClubApi = {
     };
   },
 
+  async getMyClubs() {
+    return [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" as const }];
+  },
+
+  setActiveClubId() {},
+
+  async updateClubSettings(input) {
+    Object.assign(club, input);
+    return club;
+  },
+
+  async createClub(_input: CreateClubRequest) {
+    throw new Error("Club creation is available in authenticated mode.");
+  },
+
   async getTicketDrawingOptions() {
     return drawings.filter((drawing) => drawing.status === "pending").map((drawing) => ({
       lottery: drawing.lottery,
       drawingDate: drawing.drawingDate,
       maxDrawingCount: 1,
+      drawingCountOptions: getDrawingCountOptions(drawing.lottery, 1),
+      maxNumberSets: 10,
       ticketPrice: drawing.lottery === "powerball" ? 2 : 5,
       numberRules: {
         mainNumberCount: 5,
@@ -198,6 +217,24 @@ export const demoClubApi: ClubApi = {
     }
     liveContributions = [contribution, ...liveContributions];
     return contribution;
+  },
+
+  async updateContribution(contributionId: string, input: CreateContributionInput) {
+    const existing = liveContributions.find((item) => item.id === contributionId && item.userId === ownerId);
+    if (!existing) throw new Error("Ticket was not found or is no longer editable.");
+    const plays = input.numberSets ?? [{ numbers: input.numbers!, bonusNumber: input.bonusNumber! }];
+    const updated: Contribution = {
+      ...existing,
+      lottery: input.lottery,
+      drawingDate: input.drawingDate,
+      drawingCount: input.drawingCount,
+      numberSets: plays.map((play) => ({ id: crypto.randomUUID(), contributionId, numbers: play.numbers, bonusNumber: String(play.bonusNumber), createdAt: now })),
+      costUsd: (input.lottery === "powerball" ? 2 : 5) * input.drawingCount * plays.length,
+      updatedAt: new Date().toISOString(),
+      version: existing.version + 1,
+    };
+    liveContributions = liveContributions.map((item) => item.id === contributionId ? updated : item);
+    return updated;
   },
 
   async getContributionPhoto(contributionId: string) {

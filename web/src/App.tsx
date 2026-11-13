@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   LockKeyhole,
   Menu,
+  Pencil,
   Plus,
   ScanLine,
   Search,
@@ -27,13 +28,13 @@ import {
   X,
 } from "lucide-react";
 
-import type { Contribution, LotteryType } from "../../src/domain";
+import type { Club, Contribution, LotteryType } from "../../src/domain";
 import { drawingResultState } from "../../src/api/drawing-result-state";
 import { emptyOcrModel, findPhotoExample, hasLearnableOcrRows, learnOcrCorrections, parseWithOcrModel, rememberPhotoExample } from "../../src/services/ticket-ocr-learning";
 import { clearOcrModel, loadOcrModel, saveOcrModel } from "../../src/services/ticket-ocr-learning-store";
 import { createClubApi } from "./api/club-api";
 import { demoClubApi } from "./api/demo-club-api";
-import type { ClubApi, ClubMemberView, ClubOverview, CreateContributionInput, DrawingResultView, TicketDrawingOption } from "./api/contracts";
+import type { ClubApi, ClubMemberView, ClubOverview, CreateClubRequest, CreateContributionInput, DrawingResultView, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./api/contracts";
 import type { TicketNumberSetInput } from "../../src/api/contracts";
 
 type View = "overview" | "contributions" | "results" | "members";
@@ -82,11 +83,16 @@ function App() {
   const [api, setApi] = useState<ClubApi>(() => createClubApi());
   const [view, setView] = useState<View>("overview");
   const [overview, setOverview] = useState<ClubOverview | null>(null);
+  const [clubs, setClubs] = useState<UserClubSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingContribution, setEditingContribution] = useState<Contribution | null>(null);
+  const [createClubOpen, setCreateClubOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -98,8 +104,11 @@ function App() {
         if (!mounted) return;
         setAuthenticated(isAuthenticated);
         if (!isAuthenticated) return;
-        const data = await api.getOverview();
-        if (mounted) setOverview(data);
+        const [data, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
+        if (mounted) {
+          setOverview(data);
+          setClubs(userClubs);
+        }
       })
       .catch((cause: unknown) => {
         if (mounted) {
@@ -119,6 +128,70 @@ function App() {
     setView("contributions");
     setDialogOpen(false);
     setNotice(api.mode === "demo" ? "Contribution added to the demo club." : "Contribution recorded.");
+    window.setTimeout(() => setNotice(null), 3600);
+  };
+
+  const openNewContribution = () => {
+    setEditingContribution(null);
+    setDialogOpen(true);
+  };
+
+  const editContribution = (contribution: Contribution) => {
+    setEditingContribution(contribution);
+    setDialogOpen(true);
+  };
+
+  const saveContribution = async (input: CreateContributionInput, photo?: File) => {
+    if (!editingContribution) {
+      await addContribution(input, photo);
+      return;
+    }
+    await api.updateContribution(editingContribution.id, input);
+    const updated = await api.getOverview();
+    setOverview(updated);
+    setView("contributions");
+    setDialogOpen(false);
+    setEditingContribution(null);
+    setNotice("Ticket updated and audited.");
+    window.setTimeout(() => setNotice(null), 3600);
+  };
+
+  const createClub = async (input: CreateClubRequest) => {
+    const created = await api.createClub(input);
+    setOverview(created);
+    setClubs(await api.getMyClubs());
+    setView("overview");
+    setCreateClubOpen(false);
+    setSwitcherOpen(false);
+    setNotice("Club created. Official ticket options are being prepared.");
+    window.setTimeout(() => setNotice(null), 4200);
+  };
+
+  const switchClub = async (clubId: string) => {
+    if (clubId === overview?.club.id) { setSwitcherOpen(false); return; }
+    api.setActiveClubId(clubId);
+    setSwitcherOpen(false);
+    setLoading(true);
+    setError(null);
+    try {
+      const [nextOverview, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
+      setOverview(nextOverview);
+      setClubs(userClubs);
+      setView("overview");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The selected club could not be opened.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveClubSettings = async (input: UpdateClubSettingsRequest) => {
+    await api.updateClubSettings(input);
+    const [updated, userClubs] = await Promise.all([api.getOverview(), api.getMyClubs()]);
+    setOverview(updated);
+    setClubs(userClubs);
+    setSettingsOpen(false);
+    setNotice("Club settings saved.");
     window.setTimeout(() => setNotice(null), 3600);
   };
 
@@ -169,11 +242,14 @@ function App() {
             <span className="wordmark-name">the club<span className="wordmark-period">.</span></span>
           </a>
           <button className="icon-button mobile-close" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}><X size={18} /></button>
-          <button className="club-switcher" type="button">
-            <span className="club-avatar">LL</span>
-            <span className="club-switcher-copy"><strong>{overview.club.name}</strong><small>Private club</small></span>
-            <ChevronDown size={16} />
-          </button>
+          <div className="club-switcher-wrap">
+            <button className="club-switcher" type="button" aria-expanded={switcherOpen} aria-haspopup="menu" onClick={() => setSwitcherOpen((open) => !open)}>
+              <span className="club-avatar">{overview.club.name.slice(0, 2).toUpperCase()}</span>
+              <span className="club-switcher-copy"><strong>{overview.club.name}</strong><small>{overview.club.visibility === "private" ? "Private club" : "Public club"}</small></span>
+              <ChevronDown size={16} />
+            </button>
+            {switcherOpen && <div className="club-menu" role="menu" aria-label="Your clubs">{clubs.map((item) => <button type="button" role="menuitem" key={item.id} className={item.id === overview.club.id ? "club-menu-item club-menu-item-active" : "club-menu-item"} onClick={() => void switchClub(item.id)}><span><strong>{item.name}</strong><small>{item.role} · {item.visibility}</small></span>{item.id === overview.club.id && <Check size={15} />}</button>)}{!clubs.length && <span className="club-menu-empty">No active clubs</span>}</div>}
+          </div>
           <div className="nav-caption">WORKSPACE</div>
           <nav className="primary-nav" aria-label="Club navigation">
             {navItems.map(({ id, label, icon: Icon }) => (
@@ -184,7 +260,14 @@ function App() {
             ))}
           </nav>
           <div className="nav-caption nav-caption-spaced">CLUB</div>
-          <button className="nav-item" onClick={() => setNotice("Club settings are part of the upcoming connected API.")}>
+          {api.mode === "oidc" && <button className="nav-item" onClick={() => setCreateClubOpen(true)}>
+            <Plus size={18} strokeWidth={1.8} /><span>Create a club</span>
+          </button>}
+          <button className="nav-item" onClick={() => {
+            const role = clubs.find((item) => item.id === overview.club.id)?.role;
+            if (role === "creator" || role === "admin") setSettingsOpen(true);
+            else setNotice("Only club creators and admins can update club settings.");
+          }}>
             <Settings2 size={18} strokeWidth={1.8} /><span>Club settings</span>
           </button>
           <button className="nav-item" onClick={() => setNotice("Help and support will be connected in a later step.")}>
@@ -222,11 +305,11 @@ function App() {
               <h1>{page.title}</h1>
               <p>{page.description}</p>
             </div>
-            <button className="button button-primary add-button" onClick={() => setDialogOpen(true)}><Plus size={17} />Add contribution</button>
+            <button className="button button-primary add-button" onClick={openNewContribution}><Plus size={17} />Add contribution</button>
           </div>
 
           {view === "overview" && <OverviewView data={overview} onNavigate={navigate} />}
-          {view === "contributions" && <ContributionsView api={api} currentUserId={overview.currentUser.id} contributions={overview.contributions} members={overview.members} onAdd={() => setDialogOpen(true)} />}
+          {view === "contributions" && <ContributionsView api={api} currentUserId={overview.currentUser.id} contributions={overview.contributions} members={overview.members} onAdd={openNewContribution} onEdit={editContribution} />}
           {view === "results" && <ResultsView results={overview.results} />}
           {view === "members" && <MembersView data={overview} />}
 
@@ -238,7 +321,9 @@ function App() {
       </div>
 
       {notice && <div className="toast" role="status"><Check size={16} />{notice}<button className="toast-close" aria-label="Dismiss" onClick={() => setNotice(null)}><X size={14} /></button></div>}
-      {dialogOpen && <ContributionDialog api={api} userId={overview.currentUser.id} onClose={() => setDialogOpen(false)} onSubmit={addContribution} onLearningFeedback={setNotice} />}
+      {createClubOpen && <CreateClubDialog onClose={() => setCreateClubOpen(false)} onSubmit={createClub} />}
+      {settingsOpen && <ClubSettingsDialog club={overview.club} onClose={() => setSettingsOpen(false)} onSubmit={saveClubSettings} />}
+      {dialogOpen && <ContributionDialog key={editingContribution?.id ?? "new-contribution"} api={api} userId={overview.currentUser.id} editingContribution={editingContribution ?? undefined} onClose={() => { setDialogOpen(false); setEditingContribution(null); }} onSubmit={saveContribution} onLearningFeedback={setNotice} />}
     </div>
   );
 }
@@ -363,7 +448,7 @@ function Metric({ label, value, note, accent, icon }: { label: string; value: st
   return <article className={`metric metric-${accent}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}</strong><small>{note}</small></article>;
 }
 
-function ContributionsView({ api, currentUserId, contributions, members, onAdd }: { api: ClubApi; currentUserId: string; contributions: Contribution[]; members: ClubMemberView[]; onAdd: () => void }) {
+function ContributionsView({ api, currentUserId, contributions, members, onAdd, onEdit }: { api: ClubApi; currentUserId: string; contributions: Contribution[]; members: ClubMemberView[]; onAdd: () => void; onEdit: (contribution: Contribution) => void }) {
   const [filter, setFilter] = useState<"all" | LotteryType>("all");
   const [photoId, setPhotoId] = useState<string | null>(null);
   const visible = filter === "all" ? contributions : contributions.filter((item) => item.lottery === filter);
@@ -376,7 +461,7 @@ function ContributionsView({ api, currentUserId, contributions, members, onAdd }
         <tbody>{visible.map((item) => {
           const member = members.find((candidate) => candidate.userId === item.userId);
           const sets = item.numberSets as { numbers?: number[]; bonusNumber?: string | number }[];
-          return <tr key={item.id}><td><LotteryBadge lottery={item.lottery} compact /></td><td>{member?.displayName ?? "Member"}</td><td>{formatDate(item.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</td><td><span className="ticket-number-sets">{sets.map((set, index) => <NumberSet key={index} numbers={set.numbers ?? []} bonus={set.bonusNumber} lottery={item.lottery} />)}</span></td><td>{item.drawingCount}</td><td className="money-cell">{money(item.costUsd)}</td><td><span className="ticket-status"><StatusTag label="Submitted" tone="neutral" />{item.hasTicketPhoto && <button className="icon-button ticket-photo-button" type="button" title="View ticket photo" aria-label={`View ticket photo for ${member?.displayName ?? "member"}`} onClick={() => setPhotoId(item.id)}><ImageIcon size={16} /></button>}</span></td></tr>;
+          return <tr key={item.id}><td><LotteryBadge lottery={item.lottery} compact /></td><td>{member?.displayName ?? "Member"}</td><td>{formatDate(item.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</td><td><span className="ticket-number-sets">{sets.map((set, index) => <NumberSet key={index} numbers={set.numbers ?? []} bonus={set.bonusNumber} lottery={item.lottery} />)}</span></td><td>{item.drawingCount}</td><td className="money-cell">{money(item.costUsd)}</td><td><span className="ticket-status">{item.userId === currentUserId && item.canEdit && <button className="icon-button ticket-photo-button" type="button" title="Edit ticket" aria-label={`Edit ticket for ${member?.displayName ?? "member"}`} onClick={() => onEdit(item)}><Pencil size={15} /></button>}<StatusTag label="Submitted" tone="neutral" />{item.hasTicketPhoto && <button className="icon-button ticket-photo-button" type="button" title="View ticket photo" aria-label={`View ticket photo for ${member?.displayName ?? "member"}`} onClick={() => setPhotoId(item.id)}><ImageIcon size={16} /></button>}</span></td></tr>;
         })}</tbody></table>
       </div>
       <div className="table-footnote"><Eye size={14} />Ticket records are visible to club members. The app does not verify physical tickets.</div>
@@ -486,13 +571,122 @@ function StatusTag({ label, tone }: { label: string; tone: "success" | "warning"
   return <span className={`status-tag status-${tone}`}><span />{label}</span>;
 }
 
-function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback }: { api: ClubApi; userId: string; onClose: () => void; onSubmit: (input: CreateContributionInput, photo?: File) => Promise<void>; onLearningFeedback: (message: string) => void }) {
-  const [lottery, setLottery] = useState<LotteryType>("powerball");
-  const [drawingDate, setDrawingDate] = useState("");
-  const [drawingCount, setDrawingCount] = useState(1);
-  const [plays, setPlays] = useState([{ id: crypto.randomUUID(), numbersText: "", bonusText: "" }]);
+function ClubSettingsDialog({ club, onClose, onSubmit }: { club: Club; onClose: () => void; onSubmit: (input: UpdateClubSettingsRequest) => Promise<void> }) {
+  const [name, setName] = useState(club.name);
+  const [description, setDescription] = useState(club.description ?? "");
+  const [motto, setMotto] = useState(club.motto ?? "");
+  const [visibility, setVisibility] = useState(club.visibility);
+  const [allowSearch, setAllowSearch] = useState(club.allowSearch);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        name: name.trim(),
+        description: description.trim() || null,
+        motto: motto.trim() || null,
+        visibility,
+        allowSearch: visibility === "public" || allowSearch,
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Club settings could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <section className="contribution-dialog create-club-dialog" role="dialog" aria-modal="true" aria-labelledby="club-settings-title">
+      <div className="dialog-head"><div><span className="section-kicker">CLUB</span><h2 id="club-settings-title">Club settings</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog" disabled={saving}><X size={18} /></button></div>
+      <form onSubmit={submit}>
+        <label className="field-label">Club name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required /></label>
+        <label className="field-label">Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={500} rows={2} /></label>
+        <label className="field-label">Motto<input value={motto} onChange={(event) => setMotto(event.target.value)} maxLength={200} /></label>
+        <label className="field-label">Visibility<select value={visibility} onChange={(event) => setVisibility(event.target.value as Club["visibility"])}><option value="private">Private</option><option value="public">Public</option></select></label>
+        {visibility === "private" && <label className="club-setting-toggle"><input type="checkbox" checked={allowSearch} onChange={(event) => setAllowSearch(event.target.checked)} />Allow this private club to appear in search</label>}
+        <p className="photo-help">Payout configuration and supported lotteries are fixed when the club is created.</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose} disabled={saving}>Cancel</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving..." : "Save settings"}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
+function CreateClubDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: CreateClubRequest) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [supportedLotteries, setSupportedLotteries] = useState<LotteryType[]>(["powerball", "mega_millions"]);
+  const [payoutType, setPayoutType] = useState<CreateClubRequest["payoutConfiguration"]["type"]>("equal_shares");
+  const [thresholdAmount, setThresholdAmount] = useState("100");
+  const [thresholdMethod, setThresholdMethod] = useState<"pooled" | "individual">("pooled");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const amount = Number(thresholdAmount);
+    if (!supportedLotteries.length) { setError("Select at least one lottery."); return; }
+    if (!Number.isFinite(amount) || amount <= 0) { setError("Enter a threshold greater than zero."); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        name: name.trim(),
+        description: description.trim() || null,
+        visibility,
+        supportedLotteries,
+        allowSearch: visibility === "public",
+        payoutConfiguration: { type: payoutType },
+        thresholdRule: { thresholdAmount: amount, method: thresholdMethod },
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The club could not be created.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <section className="contribution-dialog create-club-dialog" role="dialog" aria-modal="true" aria-labelledby="create-club-title">
+      <div className="dialog-head"><div><span className="section-kicker">NEW WORKSPACE</span><h2 id="create-club-title">Create a club</h2></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog" disabled={saving}><X size={18} /></button></div>
+      <form onSubmit={submit}>
+        <label className="field-label">Club name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required autoFocus /></label>
+        <label className="field-label">Description (optional)<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={500} rows={2} /></label>
+        <div className="field-grid">
+          <label className="field-label">Visibility<select value={visibility} onChange={(event) => setVisibility(event.target.value as "private" | "public")}><option value="private">Private</option><option value="public">Public</option></select></label>
+          <label className="field-label">Payout style<select value={payoutType} onChange={(event) => setPayoutType(event.target.value as CreateClubRequest["payoutConfiguration"]["type"])}><option value="equal_shares">Equal shares</option><option value="proportion_drawing_specific">Proportional by drawing</option><option value="proportion_all_drawings">Proportional across all drawings</option></select></label>
+        </div>
+        <fieldset className="club-lottery-fields"><legend>Supported lotteries</legend>{(["powerball", "mega_millions"] as const).map((lottery) => <label key={lottery}><input type="checkbox" checked={supportedLotteries.includes(lottery)} onChange={(event) => setSupportedLotteries((current) => event.target.checked ? [...current, lottery] : current.filter((value) => value !== lottery))} />{lotteryName(lottery)}</label>)}</fieldset>
+        <div className="field-grid">
+          <label className="field-label">Threshold amount ($)<input type="number" min="0.01" step="0.01" value={thresholdAmount} onChange={(event) => setThresholdAmount(event.target.value)} required /></label>
+          <label className="field-label">Threshold method<select value={thresholdMethod} onChange={(event) => setThresholdMethod(event.target.value as "pooled" | "individual")}><option value="pooled">Pooled winnings</option><option value="individual">Individual prizes</option></select></label>
+        </div>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <p className="photo-help">We’ll prepare upcoming drawings and fetch official rules and ticket prices before opening ticket entry.</p>
+        <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose} disabled={saving}>Cancel</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Preparing club..." : "Create club"}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
+function ContributionDialog({ api, userId, editingContribution, onClose, onSubmit, onLearningFeedback }: { api: ClubApi; userId: string; editingContribution?: Contribution; onClose: () => void; onSubmit: (input: CreateContributionInput, photo?: File) => Promise<void>; onLearningFeedback: (message: string) => void }) {
+  const [lottery, setLottery] = useState<LotteryType>(editingContribution?.lottery ?? "powerball");
+  const [drawingDate, setDrawingDate] = useState(editingContribution?.drawingDate ?? "");
+  const [drawingCount, setDrawingCount] = useState(editingContribution?.drawingCount ?? 1);
+  const [plays, setPlays] = useState(() => {
+    const savedSets = editingContribution?.numberSets as { numbers?: number[]; bonusNumber?: string | number }[] | undefined;
+    return savedSets?.length
+      ? savedSets.map((set) => ({ id: crypto.randomUUID(), numbersText: (set.numbers ?? []).join(", "), bonusText: String(set.bonusNumber ?? "") }))
+      : [{ id: crypto.randomUUID(), numbersText: "", bonusText: "" }];
+  });
   const [options, setOptions] = useState<TicketDrawingOption[]>([]);
   const [loadingOptions, setLoadingOptions] = useState(true);
+  const [refreshingPricing, setRefreshingPricing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [photo, setPhoto] = useState<File | null>(null);
@@ -517,6 +711,7 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
   const rules = selected?.numberRules;
   const lotteries = [...new Set(options.map((option) => option.lottery))];
   const canLearn = ocrText !== null && hasLearnableOcrRows(ocrText);
+  const needsPricingRefresh = Boolean(drawingDate) && (!selected || selected.ticketPrice == null || !selected.numberRules);
 
   useEffect(() => {
     mounted.current = true;
@@ -535,17 +730,17 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
     api.getTicketDrawingOptions().then((available) => {
       if (!active) return;
       setOptions(available);
-      const firstLottery = available[0]?.lottery;
+      const firstLottery = editingContribution?.lottery ?? available[0]?.lottery;
       if (firstLottery) {
         setLottery(firstLottery);
         const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-        setDrawingDate(available.find((option) => option.lottery === firstLottery && option.drawingDate >= today)?.drawingDate ?? "");
+        setDrawingDate(editingContribution?.drawingDate ?? available.find((option) => option.lottery === firstLottery && option.drawingDate >= today)?.drawingDate ?? "");
       }
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : "Drawing options could not be loaded.");
     }).finally(() => { if (active) setLoadingOptions(false); });
     return () => { active = false; };
-  }, [api]);
+  }, [api, editingContribution]);
 
   const handleLotteryChange = (next: LotteryType) => {
     setLottery(next);
@@ -560,6 +755,23 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
     setOcrApplied(false);
     setOcrConfirmed(false);
     setError(null);
+  };
+
+  const refreshPricing = async () => {
+    setRefreshingPricing(true);
+    setError(null);
+    try {
+      const refreshed = await api.getTicketDrawingOptions();
+      setOptions(refreshed);
+      const current = refreshed.find((option) => option.lottery === lottery && option.drawingDate === drawingDate);
+      if (!current?.numberRules || current.ticketPrice == null) {
+        setError("Official ticket pricing is still unavailable for this drawing.");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Ticket pricing could not be refreshed.");
+    } finally {
+      setRefreshingPricing(false);
+    }
   };
 
   const chooseNumber = (playId: string, slot: number, value: number) => {
@@ -601,7 +813,7 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
       const text = await readTicketPhoto(photo);
       const result = parseWithOcrModel(text, rules, model);
       if (!mounted.current) return;
-      if (result.plays.length > 20) throw new Error("More than 20 plays were detected. Enter this ticket manually.");
+      if (result.plays.length > (selected?.maxNumberSets ?? 10)) throw new Error(`More than ${selected?.maxNumberSets ?? 10} number sets were detected. Enter or combine them manually.`);
       setOcrText(text);
       setOcrResult(result);
     } catch (cause) {
@@ -640,7 +852,7 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
       if (learningConsent && photo) {
         try { fingerprint = await photoFingerprint(photo); } catch { learningMessage = "Contribution recorded, but reader learning is unavailable on this browser."; }
       }
-      await onSubmit({ lottery, drawingDate, drawingCount, numberSets }, photo ?? undefined);
+      await onSubmit({ lottery, drawingDate, drawingCount, numberSets }, editingContribution ? undefined : photo ?? undefined);
       if (fingerprint) {
         const storage = readerStorage();
         if (!storage) {
@@ -665,15 +877,15 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
 
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="contribution-dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-      <div className="dialog-head"><div><span className="section-kicker">NEW TICKET</span><h2 id="dialog-title">Add a contribution</h2></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
+      <div className="dialog-head"><div><span className="section-kicker">{editingContribution ? "EDIT TICKET" : "NEW TICKET"}</span><h2 id="dialog-title">{editingContribution ? "Edit contribution" : "Add a contribution"}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18} /></button></div>
       <form onSubmit={submit}>
         <label className="field-label">Lottery</label>
         <div className="lottery-choice">
-          {lotteries.map((option) => <button type="button" disabled={reading} className={`lottery-option ${lottery === option ? "lottery-option-selected" : ""}`} onClick={() => handleLotteryChange(option)} key={option}><LotteryBadge lottery={option} />{lottery === option && <Check size={16} />}</button>)}
+          {lotteries.map((option) => <button type="button" disabled={reading || Boolean(editingContribution)} className={`lottery-option ${lottery === option ? "lottery-option-selected" : ""}`} onClick={() => handleLotteryChange(option)} key={option}><LotteryBadge lottery={option} />{lottery === option && <Check size={16} />}</button>)}
         </div>
         <div className="field-grid">
           <label className="field-label">Drawing date<select value={drawingDate} onChange={(event) => { setDrawingDate(event.target.value); setDrawingCount(1); setActiveNumber(null); setOcrResult(null); setOcrText(null); setLearningConsent(false); setError(null); }} required disabled={loadingOptions || reading}><option value="">Select a drawing</option>{options.filter((option) => option.lottery === lottery).map((option) => <option value={option.drawingDate} key={option.drawingDate}>{formatDate(option.drawingDate, { month: "short", day: "numeric", year: "numeric" })}</option>)}</select></label>
-          <label className="field-label">Consecutive drawings<select value={drawingCount} onChange={(event) => setDrawingCount(Number(event.target.value))} disabled={!selected}>{Array.from({ length: selected?.maxDrawingCount ?? 1 }, (_, index) => <option value={index + 1} key={index + 1}>{index + 1} {index === 0 ? "drawing" : "drawings"}</option>)}</select></label>
+          <label className="field-label">Number of drawings<select value={drawingCount} onChange={(event) => setDrawingCount(Number(event.target.value))} disabled={!selected}>{(selected?.drawingCountOptions ?? [1]).map((count) => <option value={count} key={count}>{count} {count === 1 ? "drawing" : "drawings"}</option>)}</select></label>
         </div>
         {plays.map((play, index) => {
           const count = rules?.mainNumberCount ?? 5;
@@ -700,7 +912,8 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
             </div>}
           </div>;
         })}
-        <button className="button button-secondary add-play-button" type="button" disabled={plays.length >= 20} onClick={() => { setPlays((current) => [...current, { id: crypto.randomUUID(), numbersText: "", bonusText: "" }]); setOcrConfirmed(false); setLearningConsent(false); }}><Plus size={15} />Add play</button>
+        <button className="button button-secondary add-play-button" type="button" disabled={plays.length >= (selected?.maxNumberSets ?? 10)} onClick={() => { setPlays((current) => [...current, { id: crypto.randomUUID(), numbersText: "", bonusText: "" }]); setOcrConfirmed(false); setLearningConsent(false); }}><Plus size={15} />Add play</button>
+        {!editingContribution && <>
         <label className="field-label">Ticket photo (optional)<input ref={photoInput} type="file" accept="image/jpeg,image/png,image/webp" disabled={reading} onChange={(event) => {
           const file = event.target.files?.[0] ?? null;
           if (file && (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024 || file.size === 0)) {
@@ -725,9 +938,12 @@ function ContributionDialog({ api, userId, onClose, onSubmit, onLearningFeedback
         {ocrApplied && <div className="ocr-confirmation">{ocrUnrecognized > 0 && <p>{ocrUnrecognized} possible {ocrUnrecognized === 1 ? "play was" : "plays were"} not recognized. Add any missing plays before submitting.</p>}<label><input type="checkbox" checked={ocrConfirmed} onChange={(event) => setOcrConfirmed(event.target.checked)} />I checked every play against the ticket photo.</label></div>}
         {photo && <div className="ocr-learning"><label><input type="checkbox" checked={learningConsent} disabled={reading} onChange={(event) => setLearningConsent(event.target.checked)} />I checked these plays and agree to remember this photo on this browser.</label><p>The plays and a photo fingerprint are stored locally, not the photo or full scan text. They can be suggested for this exact photo; repeated OCR corrections may also help with other photos.</p>{ocrText !== null && !canLearn && <p>This scan has no OCR corrections, but its confirmed plays can still be remembered for this exact photo.</p>}</div>}
         {learningCount > 0 && <button className="text-button clear-learning-button" type="button" onClick={() => { const storage = readerStorage(); if (storage && clearOcrModel(storage, userId)) { setLearningCount(0); setOcrResult(null); setOcrText(null); setLearningConsent(false); setError(null); } else setError("Reader learning could not be cleared on this browser."); }}>Clear local reader learning</button>}
+        </>}
+        {editingContribution?.hasTicketPhoto && <p className="photo-help">The existing ticket photo will stay attached to this contribution.</p>}
         <div className="cost-preview"><span>Recorded ticket cost</span><strong>{selected?.ticketPrice != null ? ticketMoney(selected.ticketPrice * drawingCount * plays.length) : "Unavailable"}</strong><small>{loadingOptions ? "Loading drawings..." : !options.length ? "No drawings are available." : selected?.ticketPrice != null && rules ? "Based on saved official rules." : "Official rules and pricing are not available for this drawing."}</small></div>
+        {needsPricingRefresh && <button className="button button-secondary refresh-price-button" type="button" disabled={refreshingPricing || loadingOptions} onClick={refreshPricing}>{refreshingPricing ? "Refreshing price..." : "Refresh official price"}</button>}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || reading || (ocrApplied && !ocrConfirmed) || !selected || selected.ticketPrice === null || !rules}>{saving ? "Adding..." : <><Plus size={16} />Add ticket</>}</button></div>
+        <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || reading || (ocrApplied && !ocrConfirmed) || !selected || selected.ticketPrice === null || !rules}>{saving ? "Saving..." : editingContribution ? "Save changes" : <><Plus size={16} />Add ticket</>}</button></div>
         <p className="dialog-disclaimer"><ShieldCheck size={13} />Contributions are records only. No money is collected.</p>
       </form>
     </section>

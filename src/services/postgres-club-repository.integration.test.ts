@@ -82,6 +82,24 @@ postgresTest(
     assert.deepEqual(club.club.supportedLotteries, ["powerball"]);
     const membership = await service.requestMembership({ clubId: club.club.id, userId: memberId });
     assert.equal(membership.status, "active");
+    assert.deepEqual(await apiRepository.listUserClubs(ownerId), [{ id: club.club.id, name: club.club.name, visibility: "public", role: "creator" }]);
+    assert.deepEqual(await apiRepository.listUserClubs(randomUUID()), []);
+    const updatedClub = await apiRepository.updateClubSettings(ownerId, club.club.id, {
+      name: "Updated Postgres Integration Club",
+      description: "Updated description",
+      motto: null,
+      visibility: "private",
+      allowSearch: false,
+    });
+    assert.equal(updatedClub?.name, "Updated Postgres Integration Club");
+    assert.equal(updatedClub?.visibility, "private");
+    await assert.rejects(apiRepository.updateClubSettings(memberId, club.club.id, {
+      name: "Unauthorized Change",
+      description: null,
+      motto: null,
+      visibility: "public",
+      allowSearch: true,
+    }), /Only club creators and admins/);
 
     const drawingId = randomUUID();
     const nextDrawingId = randomUUID();
@@ -95,6 +113,31 @@ postgresTest(
       "INSERT INTO drawings (id, lottery, drawing_date, state, cutoff_time_et, status) VALUES ($1, $2, $3, $4, $5, $6)",
       [nextDrawingId, "powerball", "2026-11-11", "MI", "21:58:00", "pending"]
     );
+    const provisionedSchedule = await apiRepository.ensureUpcomingDrawings(ownerId, club.club.id, "2026-11-10");
+    assert.equal(provisionedSchedule?.length, 30);
+    assert.equal(provisionedSchedule?.[0].drawingDate, "2026-11-11");
+    assert.equal(provisionedSchedule?.[1].drawingDate, "2026-11-14");
+    const repeatedSchedule = await apiRepository.ensureUpcomingDrawings(ownerId, club.club.id, "2026-11-10");
+    assert.deepEqual(repeatedSchedule?.map((drawing) => drawing.id), provisionedSchedule?.map((drawing) => drawing.id));
+    assert.equal(await apiRepository.ensureUpcomingDrawings(randomUUID(), club.club.id, "2026-11-10"), null);
+    const easternDateParts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+    const easternDateValues = Object.fromEntries(easternDateParts.map((part) => [part.type, part.value]));
+    const easternToday = `${easternDateValues.year}-${easternDateValues.month}-${easternDateValues.day}`;
+    const activeSchedule = await apiRepository.ensureUpcomingDrawings(
+      ownerId,
+      club.club.id,
+      `${easternDateValues.year}-${easternDateValues.month}-${easternDateValues.day}`
+    );
+    const emptyClubOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
+    assert.equal(emptyClubOverview?.contributions.length, 0);
+    for (const drawing of activeSchedule ?? []) {
+      assert.equal(emptyClubOverview?.results.some((item) => item.drawing.id === drawing.id), true);
+    }
     await client.query(
       `
         INSERT INTO contributions (
@@ -188,11 +231,14 @@ postgresTest(
     assert.equal((await repository.findCalculationSnapshotById(snapshot.id))?.sourceSha256, snapshot.sourceSha256);
 
     const options = await apiRepository.getTicketDrawingOptions(ownerId, club.club.id);
-    assert.deepEqual(options?.map((option) => [option.drawingDate, option.maxDrawingCount, option.ticketPrice]), [
-      ["2026-11-09", 2, 2],
-      ["2026-11-11", 1, null],
-    ]);
-    assert.equal(options?.[0].numberRules?.mainNumberMax, 69);
+    const optionsByDate = new Map(options?.map((option) => [option.drawingDate, option]));
+    const firstUpcomingDate = activeSchedule?.[0]?.drawingDate;
+    assert.ok(firstUpcomingDate);
+    assert.equal(optionsByDate.get(firstUpcomingDate)?.ticketPrice, 2);
+    assert.equal(optionsByDate.get(firstUpcomingDate)?.numberRules?.mainNumberMax, 69);
+    assert.deepEqual(optionsByDate.get(firstUpcomingDate)?.drawingCountOptions, [1, 5, 10, 15, 20, 25, 30].filter((count) => count <= activeSchedule!.length));
+    assert.equal(options?.some((option) => option.drawingDate < easternToday), false);
+    for (const drawing of activeSchedule ?? []) assert.equal(optionsByDate.has(drawing.drawingDate), true);
     assert.equal(await apiRepository.getTicketDrawingOptions(randomUUID(), club.club.id), null);
 
     const photo = { data: Buffer.from("photo fixture"), contentType: "image/png" };
@@ -209,6 +255,73 @@ postgresTest(
     assert.deepEqual(await apiRepository.getContributionPhoto(memberId, club.club.id, apiContribution.id), photo);
     assert.equal(await apiRepository.getContributionPhoto(randomUUID(), club.club.id, apiContribution.id), null);
     assert.equal(await apiRepository.getContributionPhoto(memberId, randomUUID(), apiContribution.id), null);
+    await assert.rejects(apiRepository.updateContribution(ownerId, club.club.id, apiContribution.id, {
+      lottery: "powerball",
+      drawingDate: "2026-11-09",
+      drawingCount: 1,
+      numbers: [2, 4, 6, 8, 10],
+      bonusNumber: 12,
+    }), /before the first drawing cutoff/);
+
+    const futureDrawing = activeSchedule?.find((drawing) => drawing.lottery === "powerball" && drawing.drawingDate > easternToday);
+    assert.ok(futureDrawing);
+    const futureSnapshot: CalculationSnapshot = {
+      ...snapshot,
+      id: randomUUID(),
+      drawingId: futureDrawing.id,
+      capturedAt: new Date().toISOString(),
+      sourceSha256: "f".repeat(64),
+    };
+    const futureResult: DrawingResult = {
+      ...result,
+      id: randomUUID(),
+      drawingId: futureDrawing.id,
+      officialWinningNumbers: null,
+      jackpotEstimate: null,
+      prizeBreakdown: null,
+      status: "pending",
+      sourceSnapshotId: futureSnapshot.id,
+      createdAt: futureSnapshot.capturedAt,
+    };
+    await repository.storeOfficialData(futureSnapshot, futureResult, null);
+    const editableContribution = await apiRepository.createContribution(ownerId, club.club.id, {
+      lottery: "powerball",
+      drawingDate: futureDrawing.drawingDate,
+      drawingCount: 1,
+      numberSets: [{ numbers: [1, 3, 5, 7, 9], bonusNumber: 10 }],
+    }, photo);
+    const editableOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
+    assert.equal(editableOverview?.contributions.find((item) => item.id === editableContribution.id)?.canEdit, true);
+    assert.equal((await apiRepository.getClubOverview(memberId, club.club.id))?.contributions.find((item) => item.id === editableContribution.id)?.canEdit, false);
+    const editedContribution = await apiRepository.updateContribution(ownerId, club.club.id, editableContribution.id, {
+      lottery: "powerball",
+      drawingDate: futureDrawing.drawingDate,
+      drawingCount: 1,
+      numberSets: [
+        { numbers: [2, 4, 6, 8, 10], bonusNumber: 12 },
+        { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 },
+      ],
+    });
+    assert.equal(editedContribution.version, editableContribution.version + 1);
+    assert.equal(editedContribution.costUsd, 4);
+    assert.equal(editedContribution.hasTicketPhoto, true);
+    assert.deepEqual(await apiRepository.getContributionPhoto(memberId, club.club.id, editableContribution.id), photo);
+    await assert.rejects(apiRepository.updateContribution(memberId, club.club.id, editableContribution.id, {
+      lottery: "powerball",
+      drawingDate: futureDrawing.drawingDate,
+      drawingCount: 1,
+      numbers: [2, 4, 6, 8, 10],
+      bonusNumber: 12,
+    }), /not found or is not owned/);
+    const { rows: auditRows } = await client.query(
+      "SELECT action, old_value, new_value FROM audit_events WHERE entity_type = 'contribution' AND entity_id = $1",
+      [editableContribution.id]
+    );
+    assert.equal(auditRows.length, 1);
+    assert.equal(auditRows[0].action, "updated");
+    assert.equal(auditRows[0].old_value.numberSets.length, 1);
+    assert.equal(auditRows[0].new_value.numberSets.length, 2);
+
     await assert.rejects(apiRepository.createContribution(ownerId, club.club.id, {
       lottery: "powerball",
       drawingDate: "2026-11-09",
@@ -217,7 +330,7 @@ postgresTest(
       bonusNumber: 12,
     }, { data: Buffer.alloc(5 * 1024 * 1024 + 1), contentType: "image/png" }));
     const contributionCount = await client.query("SELECT COUNT(*)::int AS count FROM contributions WHERE club_id = $1", [club.club.id]);
-    assert.equal(contributionCount.rows[0].count, 2);
+    assert.equal(contributionCount.rows[0].count, 3);
 
     const award: PrizeAward = {
       id: randomUUID(),
@@ -240,13 +353,46 @@ postgresTest(
 
     const overview = await apiRepository.getClubOverview(ownerId, club.club.id);
     assert.equal(overview?.currentUser.id, ownerId);
-    assert.equal(overview?.contributions.length, 2);
+    assert.equal(overview?.contributions.length, 3);
     assert.equal(overview?.contributions.find((item) => item.id === apiContribution.id)?.hasTicketPhoto, true);
-    assert.equal(overview?.totalContributionsUsd, 6);
+    assert.equal(overview?.totalContributionsUsd, 10);
 
     const { rows } = await client.query("SELECT id, share_amount FROM prize_awards WHERE drawing_result_id = $1", [stored.result.id]);
     assert.equal(rows.length, 1);
     assert.equal(Number(rows[0].share_amount), 100);
+
+    const preparedDrawingIds: string[] = [];
+    const onboardingApi = await buildClubApiServer({
+      repository: apiRepository,
+      webOrigin: "https://club.example.test",
+      verifyToken: async () => ({
+        subject: `oidc-${ownerId}`,
+        email: `${ownerId}@integration.test`,
+        emailVerified: true,
+        displayName: "Integration Owner",
+      }),
+      prepareTicketDrawings: async (_userId, _clubId, drawings) => {
+        preparedDrawingIds.push(...drawings.map((drawing) => drawing.id));
+      },
+    });
+    t.after(() => onboardingApi.close());
+    const createdClubResponse = await onboardingApi.inject({
+      method: "POST",
+      url: "/api/v1/clubs",
+      headers: { authorization: "Bearer valid-token" },
+      payload: {
+        name: "First Ticket Club",
+        visibility: "private",
+        supportedLotteries: ["powerball", "mega_millions"],
+        payoutConfiguration: { type: "equal_shares" },
+        thresholdRule: { thresholdAmount: 100, method: "pooled" },
+      },
+    });
+    assert.equal(createdClubResponse.statusCode, 201);
+    assert.deepEqual(createdClubResponse.json().club.supportedLotteries, ["powerball", "mega_millions"]);
+    assert.equal(createdClubResponse.json().contributions.length, 0);
+    assert.equal(preparedDrawingIds.length, 2);
+    assert.equal(preparedDrawingIds.every((drawingId) => createdClubResponse.json().results.some((item: any) => item.drawing.id === drawingId)), true);
 
     const api = await buildClubApiServer({
       repository: apiRepository,
@@ -262,7 +408,7 @@ postgresTest(
     const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
     const boundary = "photo-integration";
     const payload = Buffer.concat([
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="contribution"\r\n\r\n${JSON.stringify({ lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 2, numberSets: [{ numbers: [2, 4, 6, 8, 10], bonusNumber: 12 }, { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 }] })}\r\n--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="ticket.png"\r\nContent-Type: image/png\r\n\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="contribution"\r\n\r\n${JSON.stringify({ lottery: "powerball", drawingDate: "2026-11-09", drawingCount: 5, numberSets: [{ numbers: [2, 4, 6, 8, 10], bonusNumber: 12 }, { numbers: [1, 3, 5, 7, 9], bonusNumber: 11 }] })}\r\n--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="ticket.png"\r\nContent-Type: image/png\r\n\r\n`),
       image,
       Buffer.from(`\r\n--${boundary}--\r\n`),
     ]);
@@ -271,7 +417,7 @@ postgresTest(
     assert.equal(uploaded.statusCode, 201);
     assert.equal(uploaded.json().hasTicketPhoto, true);
     assert.equal(uploaded.json().numberSets.length, 2);
-    assert.equal(uploaded.json().costUsd, 8);
+    assert.equal(uploaded.json().costUsd, 20);
     const photoUrl = `${baseUrl}/${uploaded.json().id}/photo`;
     assert.equal((await api.inject({ method: "GET", url: photoUrl })).statusCode, 401);
     assert.equal((await api.inject({ method: "GET", url: photoUrl, headers: { authorization: "Bearer outsider" } })).statusCode, 404);

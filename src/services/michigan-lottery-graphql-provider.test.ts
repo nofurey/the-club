@@ -136,6 +136,20 @@ test("normalizes Mega Millions bonus number and returns pending draws as no resu
   assert.equal(result.result, null);
 });
 
+test("reads ticket cost wrapped in Michigan Lottery Markdown formatting", async () => {
+  const fetcher: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    return jsonResponse({ data: { getGameDetailPagesByIdentifier: body.operationName === "MichiganGameDetails" ? [
+      { title: "Game Details", body: "__Ticket Cost:__ $5.00" },
+      { title: "Prize Table", body: "<table><tr><td>5 White Balls + Mega Ball</td><td>1 in 290,472,336</td><td>Jackpot*</td></tr></table>" },
+      { title: "How to Play", body: "Choose 5 white ball numbers from 1 to 70 and 1 gold Mega Ball number from 1 to 24." },
+    ] : undefined } });
+  };
+  const provider = new MichiganLotteryGraphqlProvider(fetcher);
+  const rules = await provider.fetchRules("mega_millions");
+  assert.equal(rules.rules.priceSnapshot.ticketPrice, 5);
+});
+
 test("fetches Powerball jackpot and cash value only for the announced next draw", async () => {
   const fragment = `<h5 class="title-date">Mon, Nov 9, 2026</h5>
     <div id="nextDraw" data-drawdateutc="2026-11-10T03:59:00.0000000Z"></div>

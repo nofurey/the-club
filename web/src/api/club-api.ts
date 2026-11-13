@@ -2,7 +2,7 @@ import { UserManager, WebStorageStateStore, type UserManagerSettings } from "oid
 
 import type { Contribution } from "../../../src/domain";
 import { demoClubApi } from "./demo-club-api";
-import type { ClubApi, ClubOverview, CreateContributionInput, TicketDrawingOption } from "./contracts";
+import type { Club, ClubApi, ClubOverview, CreateClubRequest, CreateContributionInput, TicketDrawingOption, UpdateClubSettingsRequest, UserClubSummary } from "./contracts";
 
 class ApiResponseError extends Error {
   constructor(message: string, readonly status: number) {
@@ -17,7 +17,7 @@ class OidcHttpClubApi implements ClubApi {
 
   constructor(
     private readonly apiBaseUrl: string,
-    private readonly clubId: string,
+    private clubId: string,
     settings: UserManagerSettings
   ) {
     this.userManager = new UserManager(settings);
@@ -44,6 +44,33 @@ class OidcHttpClubApi implements ClubApi {
     return this.request(`/clubs/${encodeURIComponent(this.clubId)}/overview`);
   }
 
+  async getMyClubs(): Promise<UserClubSummary[]> {
+    const response = await this.request<{ clubs: UserClubSummary[] }>("/me/clubs");
+    return response.clubs;
+  }
+
+  setActiveClubId(clubId: string): void {
+    this.clubId = clubId;
+    try { window.sessionStorage.setItem("the-club.active-club-id", clubId); } catch {}
+  }
+
+  async createClub(input: CreateClubRequest): Promise<ClubOverview> {
+    const overview = await this.request<ClubOverview>("/clubs", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    this.setActiveClubId(overview.club.id);
+    return overview;
+  }
+
+  async updateClubSettings(input: UpdateClubSettingsRequest): Promise<Club> {
+    const response = await this.request<{ club: Club }>(`/clubs/${encodeURIComponent(this.clubId)}/settings`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+    return response.club;
+  }
+
   async getTicketDrawingOptions(): Promise<TicketDrawingOption[]> {
     return this.request(`/clubs/${encodeURIComponent(this.clubId)}/ticket-drawings`);
   }
@@ -59,6 +86,13 @@ class OidcHttpClubApi implements ClubApi {
     return this.request(`/clubs/${encodeURIComponent(this.clubId)}/contributions`, {
       method: "POST",
       body,
+    });
+  }
+
+  async updateContribution(contributionId: string, input: CreateContributionInput): Promise<Contribution> {
+    return this.request(`/clubs/${encodeURIComponent(this.clubId)}/contributions/${encodeURIComponent(contributionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
     });
   }
 
@@ -102,8 +136,13 @@ class UnconfiguredClubApi implements ClubApi {
     throw new Error("Configure the OIDC authority, client ID, and club ID to enable sign-in.");
   }
   async getOverview(): Promise<ClubOverview> { throw new Error("OIDC is not configured."); }
+  async getMyClubs(): Promise<UserClubSummary[]> { throw new Error("OIDC is not configured."); }
+  setActiveClubId(): void { throw new Error("OIDC is not configured."); }
+  async createClub(): Promise<ClubOverview> { throw new Error("OIDC is not configured."); }
+  async updateClubSettings(): Promise<Club> { throw new Error("OIDC is not configured."); }
   async getTicketDrawingOptions(): Promise<TicketDrawingOption[]> { throw new Error("OIDC is not configured."); }
   async createContribution(): Promise<Contribution> { throw new Error("OIDC is not configured."); }
+  async updateContribution(): Promise<Contribution> { throw new Error("OIDC is not configured."); }
   async getContributionPhoto(): Promise<Blob> { throw new Error("OIDC is not configured."); }
 }
 
@@ -114,7 +153,9 @@ export function createClubApi(): ClubApi {
 
   const authority = import.meta.env.VITE_OIDC_AUTHORITY?.trim();
   const clientId = import.meta.env.VITE_OIDC_CLIENT_ID?.trim();
-  const clubId = import.meta.env.VITE_CLUB_ID?.trim();
+  const configuredClubId = import.meta.env.VITE_CLUB_ID?.trim();
+  let clubId = configuredClubId;
+  try { clubId = window.sessionStorage.getItem("the-club.active-club-id")?.trim() || configuredClubId; } catch {}
   if (!authority || !clientId || !clubId) {
     return new UnconfiguredClubApi();
   }
