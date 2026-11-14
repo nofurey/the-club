@@ -8,7 +8,7 @@ import type { Contribution, Drawing, LotteryType, Notification, NotificationPref
 import type { ClubDiscoverySummary, ClubOverview, CreateClubRequest, CreateContributionInput, MembershipActionResult, MembershipRequestView, RecalculationTarget, TicketDrawingOption, UpdateClubSettingsRequest, UpdateContributionRepositoryResult, UpdateNotificationPreferencesRequest, UserClubSummary } from "./contracts";
 import { LotteryTypeSchema } from "../validators";
 import { ClubApiError } from "./errors";
-import { OidcEmailVerificationRequiredError, type OidcIdentity, type OidcTokenVerifier } from "./oidc-auth";
+import { OidcEmailVerificationRequiredError, OidcProfileIncompleteError, type OidcIdentity, type OidcTokenVerifier } from "./oidc-auth";
 import { getMaxNumberSets, isAllowedDrawingCount } from "../services/drawing-schedule";
 import { hasValidPlayOptions } from "../services/ticket-options";
 
@@ -48,7 +48,7 @@ export interface TicketPhoto {
 export interface ClubApiServerOptions {
   repository: ClubApiRepository;
   verifyToken: OidcTokenVerifier;
-  webOrigin: string;
+  webOrigin: string | string[];
   prepareTicketDrawings?: (userId: string, clubId: string, drawings: Drawing[]) => Promise<void>;
   recalculateDrawings?: (clubId: string, targets: RecalculationTarget[]) => Promise<void>;
   logger?: boolean;
@@ -122,7 +122,7 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
   await server.register(cors, {
     origin: webOrigin,
     methods: ["GET", "POST", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    allowedHeaders: ["Authorization", "Content-Type", "X-Identity-Token"],
     maxAge: 600,
   });
   await server.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 1, parts: 2, fieldSize: 16 * 1024 } });
@@ -149,10 +149,17 @@ export async function buildClubApiServer({ repository, verifyToken, webOrigin, p
 
     let identity: OidcIdentity;
     try {
-      identity = await verifyToken(authorization.slice("Bearer ".length));
+      const identityToken = request.headers["x-identity-token"];
+      identity = await verifyToken(
+        authorization.slice("Bearer ".length),
+        typeof identityToken === "string" ? identityToken : undefined
+      );
     } catch (error) {
       if (error instanceof OidcEmailVerificationRequiredError) {
         return reply.code(403).send({ error: "email_verification_required", message: error.message });
+      }
+      if (error instanceof OidcProfileIncompleteError) {
+        return reply.code(403).send({ error: "profile_incomplete", message: error.message });
       }
       request.log.warn({
         errorName: error instanceof Error ? error.name : "UnknownError",

@@ -1,0 +1,16 @@
+FROM node:20-alpine AS web-build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
+
+COPY src ./src
+COPY web ./web
+COPY tsconfig.json ./
+RUN npm run build:web
+
+FROM caddy:2-alpine
+
+COPY deploy/tunnel/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web-build /app/dist-web /srv/dist-web

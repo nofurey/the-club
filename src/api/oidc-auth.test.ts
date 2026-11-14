@@ -26,7 +26,16 @@ test("verifies OIDC signatures, issuer, audience, and verified-email claims", as
   const address = jwksServer.address();
   assert.ok(address && typeof address !== "string");
 
-  const verify = createOidcTokenVerifier({ issuer, audience, jwksUrl: `http://127.0.0.1:${address.port}/jwks` });
+  const jwksUrl = `http://127.0.0.1:${address.port}/jwks`;
+  const verify = createOidcTokenVerifier({ issuer, audience, jwksUrl });
+  const verifyCognito = createOidcTokenVerifier({ issuer, audience, cognitoClientId: "cognito-client-123", jwksUrl });
+  const verifyCognitoProfile = createOidcTokenVerifier({
+    issuer,
+    audience,
+    cognitoClientId: "cognito-client-123",
+    requireCognitoProfile: true,
+    jwksUrl,
+  });
   const validToken = await new SignJWT({
     email: "member@example.test",
     email_verified: true,
@@ -46,6 +55,147 @@ test("verifies OIDC signatures, issuer, audience, and verified-email claims", as
     emailVerified: true,
     displayName: "Verified Member",
   });
+
+  const cognitoAccessToken = await new SignJWT({
+    client_id: "cognito-client-123",
+    token_use: "access",
+    email: "member@example.test",
+    email_verified: true,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  assert.equal((await verifyCognito(cognitoAccessToken)).subject, "cognito-subject");
+  await assert.rejects(() => verifyCognitoProfile(cognitoAccessToken), /username, first name, and last name/i);
+
+  const completeCognitoToken = await new SignJWT({
+    client_id: "cognito-client-123",
+    token_use: "access",
+    email: "member@example.test",
+    email_verified: true,
+    preferred_username: "member.handle",
+    given_name: "First",
+    family_name: "Last",
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  assert.deepEqual(await verifyCognitoProfile(completeCognitoToken), {
+    subject: "cognito-subject",
+    email: "member@example.test",
+    emailVerified: true,
+    displayName: "First Last",
+    username: "member.handle",
+    firstName: "First",
+    lastName: "Last",
+  });
+
+  const unverifiedAccessToken = await new SignJWT({
+    client_id: "cognito-client-123",
+    token_use: "access",
+    email: "member@example.test",
+    email_verified: false,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  const verifiedIdentityToken = await new SignJWT({
+    token_use: "id",
+    email: "member@example.test",
+    email_verified: true,
+    preferred_username: "member.handle",
+    given_name: "First",
+    family_name: "Last",
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setAudience("cognito-client-123")
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  assert.equal((await verifyCognito(unverifiedAccessToken, verifiedIdentityToken)).emailVerified, true);
+  assert.deepEqual(await verifyCognitoProfile(unverifiedAccessToken, verifiedIdentityToken), {
+    subject: "cognito-subject",
+    email: "member@example.test",
+    emailVerified: true,
+    displayName: "First Last",
+    username: "member.handle",
+    firstName: "First",
+    lastName: "Last",
+  });
+
+  const mismatchedIdentityToken = await new SignJWT({
+    token_use: "id",
+    email: "member@example.test",
+    email_verified: true,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("another-cognito-subject")
+    .setAudience("cognito-client-123")
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  await assert.rejects(
+    () => verifyCognito(unverifiedAccessToken, mismatchedIdentityToken),
+    /identity token does not match/i
+  );
+
+  const unboundCognitoAccessToken = await new SignJWT({
+    aud: "https://another-api.example.test",
+    client_id: "cognito-client-123",
+    token_use: "access",
+    email: "member@example.test",
+    email_verified: true,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  await assert.rejects(() => verifyCognito(unboundCognitoAccessToken), /audience is not authorized/i);
+
+  const unapprovedCognitoAccessToken = await new SignJWT({
+    client_id: "another-cognito-client",
+    token_use: "access",
+    email: "member@example.test",
+    email_verified: true,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  await assert.rejects(() => verifyCognito(unapprovedCognitoAccessToken), /audience is not authorized/i);
+
+  const cognitoIdToken = await new SignJWT({
+    client_id: "cognito-client-123",
+    token_use: "id",
+    email: "member@example.test",
+    email_verified: true,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(issuer)
+    .setSubject("cognito-subject")
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("2m")
+    .sign(privateKey);
+  await assert.rejects(() => verifyCognito(cognitoIdToken), /audience is not authorized/i);
 
   const wrongAudience = await new SignJWT({ email: "member@example.test", email_verified: true })
     .setProtectedHeader({ alg: "RS256", kid: "test-key" })

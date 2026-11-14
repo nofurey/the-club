@@ -32,6 +32,9 @@ export interface User {
   authSubject?: string | null;
   email: string;
   displayName: string;
+  username?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
   phoneNumber?: string | null;
   isPhoneVerified: boolean;
   status: "active" | "closed";

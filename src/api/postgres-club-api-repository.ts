@@ -24,7 +24,10 @@ import type { ClubApiRepository, TicketPhoto } from "./club-api-server";
 import type { OidcIdentity } from "./oidc-auth";
 
 export class PostgresClubApiRepository implements ClubApiRepository {
-  constructor(private readonly client: DbLikeClient) {}
+  constructor(
+    private readonly client: DbLikeClient,
+    private readonly allowVerifiedEmailRelink = false
+  ) {}
 
   async createClub(userId: string, input: CreateClubRequest): Promise<{ id: string }> {
     const created = await new ClubService(new PostgresClubRepository(this.client)).createClub({
@@ -38,35 +41,65 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     if (!identity.subject || !identity.email || identity.emailVerified !== true) {
       throw new ClubApiError(401, "A verified OIDC identity is required.", "invalid_identity");
     }
+    const username = identity.username?.trim() || null;
+    const firstName = identity.firstName?.trim() || null;
+    const lastName = identity.lastName?.trim() || null;
+    if (
+      (username && !/^[A-Za-z0-9._-]{3,30}$/.test(username)) ||
+      (firstName && firstName.length > 100) ||
+      (lastName && lastName.length > 100)
+    ) {
+      throw new ClubApiError(400, "Your profile username or name does not meet the required format.", "invalid_profile");
+    }
 
     const { rows: existingRows } = await this.client.query(
-      "SELECT * FROM users WHERE auth_subject = $1 OR email = $2 LIMIT 1",
+      "SELECT * FROM users WHERE auth_subject = $1 OR lower(email) = $2",
       [identity.subject, identity.email]
     );
+    if (existingRows.length > 1) {
+      throw new ClubApiError(409, "This sign-in identity conflicts with multiple accounts.", "identity_conflict");
+    }
     const existing = existingRows[0];
+    if (username) {
+      const { rows: usernameRows } = await this.client.query(
+        "SELECT id FROM users WHERE lower(username) = lower($1) AND id IS DISTINCT FROM $2 LIMIT 1",
+        [username, existing?.id ?? null]
+      );
+      if (usernameRows[0]) {
+        throw new ClubApiError(409, "That username is already in use.", "username_taken");
+      }
+    }
     if (existing) {
-      if (existing.auth_subject && existing.auth_subject !== identity.subject) {
+      if (
+        existing.auth_subject && existing.auth_subject !== identity.subject &&
+        (!this.allowVerifiedEmailRelink || String(existing.email).toLowerCase() !== identity.email)
+      ) {
         throw new ClubApiError(409, "This email is already linked to another sign-in identity.", "identity_conflict");
       }
       const { rows } = await this.client.query(
         `
           UPDATE users
-          SET auth_subject = $2, display_name = $3, updated_at = NOW()
+          SET auth_subject = $2,
+              display_name = COALESCE(NULLIF($3, ''), display_name),
+              username = COALESCE($4, username),
+              first_name = COALESCE($5, first_name),
+              last_name = COALESCE($6, last_name),
+              updated_at = NOW()
           WHERE id = $1
           RETURNING *
         `,
-        [existing.id, identity.subject, identity.displayName]
+        [existing.id, identity.subject, identity.displayName, username, firstName, lastName]
       );
       return this.toUser(rows[0]);
     }
 
     const { rows } = await this.client.query(
       `
-        INSERT INTO users (id, auth_subject, email, display_name, is_phone_verified, status)
-        VALUES ($1, $2, $3, $4, false, 'active')
+        INSERT INTO users (id, auth_subject, email, display_name, username, first_name, last_name, is_phone_verified, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, false, 'active')
         RETURNING *
       `,
-      [randomUUID(), identity.subject, identity.email, identity.displayName]
+      [randomUUID(), identity.subject, identity.email, identity.displayName, username, firstName, lastName]
     );
     return this.toUser(rows[0]);
   }
@@ -200,7 +233,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
   async listMembershipRequests(userId: string, clubId: string): Promise<MembershipRequestView[]> {
     await this.assertModerator(userId, clubId);
     const { rows } = await this.client.query(
-      `SELECT m.id AS membership_id, m.user_id, u.display_name, u.email, m.joined_at
+      `SELECT m.id AS membership_id, m.user_id, u.display_name, u.first_name, u.last_name, u.email, m.joined_at
        FROM club_memberships m
        JOIN users u ON u.id = m.user_id
        WHERE m.club_id = $1 AND m.status = 'pending' AND u.status = 'active'
@@ -210,7 +243,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     return rows.map((row) => ({
       membershipId: row.membership_id,
       userId: row.user_id,
-      displayName: row.display_name,
+      displayName: [row.first_name, row.last_name].filter(Boolean).join(" ") || row.display_name,
       email: row.email,
       requestedAt: this.toIso(row.joined_at),
     }));
@@ -355,7 +388,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     const thresholdRows = await this.client.query("SELECT * FROM threshold_rules WHERE club_id = $1 LIMIT 1", [clubId]);
     const memberRows = await this.client.query(
         `
-          SELECT m.*, u.display_name, u.email,
+          SELECT m.*, u.display_name, u.username, u.first_name, u.last_name, u.email,
                  COALESCE(SUM(c.cost_usd) FILTER (WHERE c.status NOT IN ('draft', 'archived')), 0) AS contribution_total_usd,
                  COUNT(c.id) FILTER (WHERE c.status NOT IN ('draft', 'archived'))::int AS ticket_count
           FROM club_memberships m
@@ -368,7 +401,7 @@ export class PostgresClubApiRepository implements ClubApiRepository {
         [clubId]
       );
       const prizePayoutRows = await this.client.query(
-        `SELECT pa.drawing_result_id, pa.user_id, u.display_name, pa.prize_type,
+        `SELECT pa.drawing_result_id, pa.user_id, u.display_name, u.username, u.first_name, u.last_name, pa.prize_type,
                 pa.gross_prize_amount, pa.share_amount, pa.threshold_met, pa.payout_type, pa.status
          FROM prize_awards pa
          LEFT JOIN users u ON u.id = pa.user_id
@@ -472,21 +505,24 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       throw new ClubApiError(409, "Club payout settings are incomplete.", "club_configuration_incomplete");
     }
 
-    const members: ClubMemberView[] = memberRows.rows.map((row) => ({
-      ...this.toMembership(row),
-      displayName: row.display_name,
-      email: row.email,
-      initials: this.initials(row.display_name),
-      contributionTotalUsd: Number(row.contribution_total_usd),
-      ticketCount: Number(row.ticket_count),
-    }));
+    const members: ClubMemberView[] = memberRows.rows.map((row) => {
+      const displayName = this.clubMemberName(club.visibility, row);
+      return {
+        ...this.toMembership(row),
+        displayName,
+        email: club.visibility === "private" ? row.email : "",
+        initials: this.initials(displayName),
+        contributionTotalUsd: Number(row.contribution_total_usd),
+        ticketCount: Number(row.ticket_count),
+      };
+    });
     const contributions = contributionRows.rows.map((row) => this.toContribution(row));
     const payoutsByResult = new Map<string, DrawingPayoutView[]>();
     for (const row of prizePayoutRows.rows) {
       const payouts = payoutsByResult.get(row.drawing_result_id) ?? [];
       payouts.push({
         userId: row.user_id,
-        memberName: row.display_name ?? "Member",
+        memberName: this.clubMemberName(club.visibility, row),
         prizeType: row.prize_type,
         grossPrizeAmount: Number(row.gross_prize_amount),
         shareAmount: Number(row.share_amount),
@@ -886,6 +922,9 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       authSubject: row.auth_subject ?? null,
       email: row.email,
       displayName: row.display_name,
+      username: row.username ?? null,
+      firstName: row.first_name ?? null,
+      lastName: row.last_name ?? null,
       phoneNumber: row.phone_number ?? null,
       isPhoneVerified: row.is_phone_verified,
       status: row.status,
@@ -893,6 +932,11 @@ export class PostgresClubApiRepository implements ClubApiRepository {
       updatedAt: this.toIso(row.updated_at),
       closedAt: row.closed_at ? this.toIso(row.closed_at) : null,
     };
+  }
+
+  private clubMemberName(visibility: Club["visibility"], user: Record<string, any>): string {
+    if (visibility === "public") return user.username || "Member";
+    return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.display_name || "Member";
   }
 
   private toNotificationPreference(row: Record<string, any>): NotificationPreference {

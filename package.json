@@ -6,16 +6,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts",
-    "serve:api": "tsx src/api/main.ts",
-    "dev:local": "bash scripts/local-start.sh",
+    "tunnel:up": "bash scripts/tunnel-up.sh",
     "typecheck:web": "tsc --noEmit -p web/tsconfig.json",
-    "dev:web": "vite --config web/vite.config.mts",
     "build:web": "vite build --config web/vite.config.mts",
     "test:postgres": "tsx --test src/services/postgres-club-repository.integration.test.ts",
-    "refresh:official-data": "tsx src/jobs/official-data-refresh.ts",
-    "refresh:official-data:alert-test": "tsx src/jobs/official-data-refresh.ts --test-alert",
-    "refresh:official-data:once": "tsx src/jobs/official-data-refresh.ts --once",
-    "retention:cleanup": "tsx src/jobs/retention-cleanup.ts"
+    "retention:cleanup:container": "docker compose --env-file ${HOME}/.config/the-club/refresh.env --env-file ${HOME}/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm api ./node_modules/.bin/tsx src/jobs/retention-cleanup.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.4.1",

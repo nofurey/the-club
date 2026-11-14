@@ -1,0 +1,11 @@
+.git
+.vscode
+node_modules
+dist
+dist-web
+build
+coverage
+.env
+.env.*
+!.env.example
+!web/.env.production.local

@@ -12,7 +12,7 @@
 - [x] Fetch Michigan Lottery rules and results through its public GraphQL endpoint; retain source documents and hashes.
 - [x] Fetch Powerball and Mega Millions next-drawing jackpot estimates and cash values; store them on the matching drawing with source metadata.
 - [x] Make official-data refreshes idempotent and clear stale awards when normalized rules or results change.
-- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (88 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
+- [x] Verify with `npm run typecheck`, `npm run typecheck:web`, and `npm test` (89 passed; opt-in real-Postgres test skipped without `TEST_DATABASE_URL`).
 - [x] Run `npm run test:postgres` against the local PostgreSQL database (1 test passed; migrations 001-008, OIDC user creation/linking, membership privacy and permissions, ownership transfer, account/club closure, payout notifications, preference/read state, email delivery/retries, API overview/contribution operations, refresh target discovery, and retention cleanup ran in a temporary schema).
 - [x] Fix PostgreSQL enum parameter inference in the drawing-status update.
 - [x] Smoke-test both jackpot/cash endpoints against their live next-drawing dates.

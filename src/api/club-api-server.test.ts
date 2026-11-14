@@ -121,10 +121,14 @@ function createRepository(): ClubApiRepository & { createdBy: string | null; upd
   };
 }
 
-async function createServer(repository = createRepository(), prepareTicketDrawings?: ClubApiServerOptions["prepareTicketDrawings"]) {
+async function createServer(
+  repository = createRepository(),
+  prepareTicketDrawings?: ClubApiServerOptions["prepareTicketDrawings"],
+  webOrigin: ClubApiServerOptions["webOrigin"] = "https://club.example.test"
+) {
   const server = await buildClubApiServer({
     repository,
-    webOrigin: "https://club.example.test",
+    webOrigin,
     prepareTicketDrawings,
     verifyToken: async (token) => {
       if (token !== "valid-token") throw new Error("invalid token");
@@ -138,6 +142,36 @@ async function createServer(repository = createRepository(), prepareTicketDrawin
   });
   return { server, repository };
 }
+
+test("allows local and public app origins for browser requests", async (t) => {
+  const { server } = await createServer(createRepository(), undefined, [
+    "http://localhost:5173",
+    "https://club.ofurey.com",
+  ]);
+  t.after(() => server.close());
+
+  const local = await server.inject({
+    method: "OPTIONS",
+    url: "/api/v1/me",
+    headers: {
+      origin: "http://localhost:5173",
+      "access-control-request-method": "GET",
+      "access-control-request-headers": "authorization",
+    },
+  });
+  const publicApp = await server.inject({
+    method: "OPTIONS",
+    url: "/api/v1/me",
+    headers: {
+      origin: "https://club.ofurey.com",
+      "access-control-request-method": "GET",
+      "access-control-request-headers": "authorization",
+    },
+  });
+
+  assert.equal(local.headers["access-control-allow-origin"], "http://localhost:5173");
+  assert.equal(publicApp.headers["access-control-allow-origin"], "https://club.ofurey.com");
+});
 
 test("requires a bearer token before returning the authenticated user", async (t) => {
   const { server } = await createServer();

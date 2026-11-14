@@ -30,8 +30,8 @@ Michigan Lottery game-detail prices may be wrapped in Markdown formatting; the p
 Raw official-source response bodies are retained for 12 months from capture. Cleanup then nulls the body while preserving its source URL, content type, SHA-256, capture time, and normalized data. Active clubs retain normalized snapshots, results, awards, contributions, ticket photos, and audit history. After a club closes, its history remains available for 12 months, then the club and dependent records are permanently deleted. The cleanup command is a dry run by default; review its JSON counts and ensure a backup succeeded before applying deletion:
 
 ```bash
-npm run retention:cleanup
-npm run retention:cleanup -- --apply
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm api ./node_modules/.bin/tsx src/jobs/retention-cleanup.ts
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm api ./node_modules/.bin/tsx src/jobs/retention-cleanup.ts --apply
 ```
 
 Schedule the apply command monthly only after establishing backup and restore procedures. The job deletes prize awards, results, and snapshots in foreign-key-safe order before deleting expired closed clubs.
@@ -40,76 +40,54 @@ Schedule the apply command monthly only after establishing backup and restore pr
 
 `PostgresOfficialDataRefreshTargetSource` selects active clubs with contributions covering unresolved recent drawings or each lottery's next scheduled drawing, using the Eastern calendar date. `OfficialDataRefreshJob` can run once with `runOnce()` or periodically with `start()`/`stop()`. It deduplicates targets, prevents overlapping runs, spaces target starts, retries failures with bounded exponential backoff, and emits structured events through `onEvent` for monitoring. Defaults are a 24-hour interval, a 30-day unresolved-results lookback, three attempts, and one second between target refreshes.
 
-Run the standalone worker with `DATABASE_URL` set using `npm run refresh:official-data`. It performs an initial refresh, then runs every 24 hours, and handles `SIGINT`/`SIGTERM` for graceful shutdown. Run it under a process manager in production; it emits structured JSON logs, but external log aggregation and alerting still need to be configured.
+The Compose `refresh-worker` service performs an initial refresh and then runs every 24 hours. Docker restarts it if the process exits; inspect its structured logs with `docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml logs -f refresh-worker`.
 
-For a local smoke test, `database/dev-seed-official-refresh.sql` idempotently creates a demo club, members, upcoming drawings, and multi-draw contributions for both supported lotteries. With `PGPASSWORD` and `DATABASE_URL` set in the shell, run:
+For a one-shot refresh without starting the scheduled worker, run `docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm refresh-worker --once`.
 
-```bash
-psql -h 127.0.0.1 -U the_club -d the_club -W -v ON_ERROR_STOP=1 -f database/dev-seed-official-refresh.sql
-npm run refresh:official-data:once
-```
+## Container Deployment
 
-The one-shot command runs a single refresh without starting another daily worker.
+Docker Compose is the only supported application runtime. PostgreSQL, API, refresh worker, Caddy, and Cloudflare Tunnel run as containers; Postgres is published only on loopback port `5433`, while API and worker share the host network for localhost database access. No API, worker, database, or Vite development server should be started directly on the host.
 
-## Linux Deployment
-
-### Local user service
-
-For a local machine with systemd enabled for your user, install the rootless unit:
-
-Edit the copied environment file to set `PGPASSWORD` before enabling or starting the service. Set `REFRESH_ALERT_WEBHOOK_URL` only when you have a monitoring endpoint; keep the file private and never commit it.
+Create protected runtime configuration files from the examples and set the Cognito pool/client values and database password:
 
 ```bash
-mkdir -p ~/.config/systemd/user ~/.config/the-club
-cp deploy/systemd/user/the-club-refresh.service ~/.config/systemd/user/
-cp deploy/systemd/user/refresh.env.example ~/.config/the-club/refresh.env
-chmod 600 ~/.config/the-club/refresh.env
-nano ~/.config/the-club/refresh.env
-systemctl --user daemon-reload
-systemctl --user enable --now the-club-refresh.service
-systemctl --user status the-club-refresh.service
-journalctl --user -u the-club-refresh.service -f
+mkdir -p ~/.config/the-club
+cp deploy/api.env.example ~/.config/the-club/api.env
+cp deploy/tunnel/refresh.env.example ~/.config/the-club/refresh.env
+cp deploy/tunnel/cloudflare-tunnel.env.example ~/.config/the-club/cloudflare-tunnel.env
+cp web/.env.production.example web/.env.production.local
+chmod 600 ~/.config/the-club/api.env ~/.config/the-club/refresh.env ~/.config/the-club/cloudflare-tunnel.env
 ```
 
-The unit starts immediately and then refreshes daily. If the user manager does not persist after logout, an administrator must enable lingering for the account. On the current local machine, the unit is already linked and enabled but left inactive until its environment file is configured; start it with `systemctl --user start the-club-refresh.service` after replacing the password placeholder.
+Add the public hostname `https://club.ofurey.com/` to the Cognito SPA app client's callback and sign-out URLs. Configure a Cloudflare Tunnel published-application route for `club.ofurey.com` to `http://127.0.0.1:8085`, then place its token only in `~/.config/the-club/cloudflare-tunnel.env`. Start or update the full stack with `npm run tunnel:up`; this command builds the web and API images, then starts all Compose services. The application runtime is Compose-only; use npm commands for build and test tasks, not to start application services.
 
-### System service
-
-`deploy/systemd/the-club-refresh.service` is a systemd template for a dedicated `the-club` service user and an install at `/opt/the-club/current`; adjust those values for the target host. It restarts on process failure and sends the worker's structured stdout/stderr to journald. The worker handles `SIGTERM` for graceful shutdown.
-
-Copy `deploy/systemd/refresh.env.example` to `/etc/the-club/refresh.env`, set `DATABASE_URL`, `PGPASSWORD`, and optionally `REFRESH_ALERT_WEBHOOK_URL`, and restrict the file to root (`chmod 600`). Install and start the unit:
+For a fresh database, start the Compose stack and apply migrations 001 through 008 once:
 
 ```bash
-sudo install -d -m 0700 /etc/the-club
-sudo cp deploy/systemd/refresh.env.example /etc/the-club/refresh.env
-sudo chmod 600 /etc/the-club/refresh.env
-sudoedit /etc/the-club/refresh.env
-sudo install -m 0644 deploy/systemd/the-club-refresh.service /etc/systemd/system/the-club-refresh.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now the-club-refresh
-journalctl -u the-club-refresh -f
+npm run tunnel:up
+for migration in database/migrations/*.sql; do
+	docker exec -i tunnel-postgres-1 psql -U the_club -d the_club -v ON_ERROR_STOP=1 < "$migration"
+done
 ```
 
-When configured, Discord webhooks receive a Discord-formatted message for failed runs or targets only. Other HTTP(S) webhooks receive JSON `{ "type": "official_data_refresh_failure", "event": ... }`. Delivery errors are logged to journald and are not retried.
+For an existing host database, make a private `pg_dump -Fc` backup, start the container database, restore the dump to `127.0.0.1:5433`, compare table counts, then point both protected `DATABASE_URL` values to `postgresql://the_club@127.0.0.1:5433/the_club` before starting the rest of the stack. Keep the host database and backup until the containerized app is verified; do not remove the Compose volume during normal shutdown.
 
-Install and run the oneshot alert-test unit to verify the configured endpoint without touching the database:
+Useful operations:
 
 ```bash
-cp deploy/systemd/user/the-club-refresh-alert-test.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user start the-club-refresh-alert-test.service
-journalctl --user -u the-club-refresh-alert-test.service -n 20
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml ps
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml logs -f api refresh-worker
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm refresh-worker --once
+docker compose --env-file ~/.config/the-club/refresh.env --env-file ~/.config/the-club/cloudflare-tunnel.env -f deploy/tunnel/compose.yaml run --rm api ./node_modules/.bin/tsx src/jobs/retention-cleanup.ts
 ```
 
-Successful delivery logs `alert_test_delivered`; an HTTP or network failure causes the oneshot unit to fail and logs `alert_delivery_failed`.
-
-Wire `new OfficialLotteryDataService(repository, new MuslVerifiedLotteryProvider(new MichiganLotteryGraphqlProvider()))` and call `refreshDrawing({ drawingId, clubId })` to fetch, validate, and store the normalized data and raw GraphQL responses. The canonical game page and exact API document URL, retrieval metadata, and SHA-256 hashes are retained. Repeated identical fetches are deduplicated; changed normalized rules or results clear stale awards and reopen the result for calculation.
-
-Apply database migrations 001 through 008 in numeric order. The provider does not substitute the current estimated jackpot for a historical draw's jackpot. If neither the Michigan API nor the official Multi-State Lottery pages supply draw-specific prize rows or a jackpot estimate, those values remain absent and the refresh fails; prize calculation must wait for an official value rather than infer one from a generic prize table.
+`docker compose down` stops the stack but retains the PostgreSQL named volume. Do not use `docker compose down -v` unless you intend to delete the container database.
 
 ## Authenticated Club API
 
 The API uses OIDC Authorization Code + PKCE in the browser and verifies bearer access tokens against the configured issuer, audience, and JWKS URL. If the access token omits identity claims, the API calls the configured UserInfo endpoint, requires a `sub` and `email_verified: true`, and matches the UserInfo subject to the token subject whenever the token includes one. `VITE_OIDC_SCOPE` must request an access token whose audience matches `OIDC_AUDIENCE`. Configure the web SPA as a public client with no client secret and register the exact redirect URI. `VITE_CLUB_ID` is optional: it selects an initial club, while users without memberships enter discovery and users with a stale selection fall back to an active membership. Authenticated members can create a club from the sidebar; the new club becomes active for the browser session after its upcoming schedule is seeded and official ticket rules/prices are fetched. The club switcher lists active memberships and changes the active club for the current browser session. Creators and Admins can update basic club details and visibility; payout configuration, threshold, and supported lotteries remain fixed after creation.
+
+For Cognito deployments that require complete profiles, request `openid email profile` and set `OIDC_REQUIRE_COGNITO_PROFILE=true`. The API stores Cognito `preferred_username`, `given_name`, and `family_name`; usernames must be unique regardless of case. Public club member views display usernames and do not expose member email addresses. Private club views display first and last names.
 
 Authenticated users can search `GET /api/v1/clubs/discovery?q=...` and join or request access with `POST /api/v1/clubs/:clubId/membership`. Public clubs activate membership immediately; private clubs create a pending request. Searchable private results expose only the club ID, name, visibility, and the caller's own membership status. Active Creators/Admins can list requests and approve or reject them. Members can leave unless they have active future-draw contributions; only the Creator can grant or remove Admin status and forcibly remove members. Forced removal is blocked after a drawing cutoff until that club's payout calculation completes, and while the target member has a pending payout. All actor IDs come from the verified bearer identity, not request payloads.
 
@@ -119,7 +97,7 @@ Creators can transfer ownership with `POST /api/v1/clubs/:clubId/transfer-owners
 
 Notifications are recorded in the same transaction that completes or recalculates a drawing payout. Initial payout notices follow the configured threshold and payout strategy; recalculations notify members whose recorded payout was added, removed, or changed. The bell opens the in-app inbox, where each member can mark notices read and toggle in-app/email preferences. Email notices are queued and drained by the API once a minute, with a five-minute claim lease and up to five attempts; SMTP delivery is at-least-once, so a process crash after SMTP accepts a message but before the database records success may cause a duplicate. Without SMTP configuration, in-app notices still work and email stays queued.
 
-Set `NOTIFICATION_SMTP_HOST`, `NOTIFICATION_SMTP_FROM`, and optionally `NOTIFICATION_SMTP_PORT` (default `587`), `NOTIFICATION_SMTP_SECURE` (`true` for implicit TLS, otherwise STARTTLS), `NOTIFICATION_SMTP_USER`, and `NOTIFICATION_SMTP_PASSWORD` in the protected API environment. The Keycloak SMTP settings do not automatically configure API notifications; copy the SMTP connection settings separately to the API's protected environment if email notices are wanted. Push and SMS are not implemented and remain disabled.
+Set `NOTIFICATION_SMTP_HOST`, `NOTIFICATION_SMTP_FROM`, and optionally `NOTIFICATION_SMTP_PORT` (default `587`), `NOTIFICATION_SMTP_SECURE` (`true` for implicit TLS, otherwise STARTTLS), `NOTIFICATION_SMTP_USER`, and `NOTIFICATION_SMTP_PASSWORD` in the protected API environment. Cognito email settings do not automatically configure API notifications; configure SMTP separately in the protected container environment if email notices are wanted. Push and SMS are not implemented and remain disabled.
 
 Ticket entry loads scheduled drawings and saved club-specific official rules and pricing from the authenticated `GET /api/v1/clubs/:clubId/ticket-drawings` endpoint. On first request, the API idempotently seeds up to 30 Powerball and 26 Mega Millions drawing dates and fetches missing official rules/prices once per lottery; the resulting price snapshot applies across that game's schedule. Current Michigan Lottery pages allow 10 panels per ticket, Powerball draw counts of 1 or multiples of 5 through 30, and Mega Millions draw counts from 1 through 26: [Powerball](https://www.michiganlottery.com/games/powerball) and [Mega Millions](https://www.michiganlottery.com/games/mega-millions). If an official source is temporarily unavailable, pricing remains unavailable and can be retried from the form. Drawing dates and ticket cutoffs follow the Michigan weekday schedule. The scheduled refresh calculates drawings after official numbers are posted and recalculates completed awards when official inputs change. The results view distinguishes posted numbers from completed calculations and shows member gross prizes and allocated payout shares.
 
@@ -131,43 +109,27 @@ Michigan Lottery ticket entry allows up to 10 panels per ticket. Powerball suppo
 
 Members may opt in per ticket to remember manually confirmed plays on their current browser, even when OCR cannot read the photo. The per-user local model stores up to 50 sets of plays with SHA-256 photo fingerprints, plus OCR token-correction counts; it does not store images or full OCR text for learning. Remembered plays are suggested only for the exact same photo and lottery, and still require review. When recognizable OCR rows are available, a correction is used only after at least three different photos support it with at least 90% agreement. The ticket owner can also opt in from an already-saved ticket's photo view. The contribution form can clear this local learning data without deleting saved ticket photos. The model does not retrain Tesseract, sync between browsers, or learn visual recognition from unreadable rows; existing tickets are not used automatically.
 
-Apply database migrations 001 through 008 in numeric order. Migration 006 records the capture time of official result documents for retention cleanup; migration 007 adds notification read state and email delivery retry metadata; migration 008 adds email claim leases. Configure the API from `deploy/api.env.example`, set `DATABASE_URL`, `PGPASSWORD`, OIDC settings, `WEB_ORIGIN`, `API_PORT`, and SMTP settings if email notifications are desired, then run `npm run serve:api`. The API binds only to `127.0.0.1`; production traffic must reach it through an HTTPS reverse proxy. In local development, Vite proxies `/api` to `http://127.0.0.1:8080`.
+Apply database migrations 001 through 008 to the container database before first use. The API, refresh worker, PostgreSQL, and web application are run through the Compose stack described above; do not start their server processes directly on the host. Cognito is the supported OIDC provider. Configure its issuer, app-client ID, managed-login domain, read access to email attributes, and exact callback/sign-out URLs in the protected API environment and public web build environment. SPA clients must not have a client secret. The API requires a verified email and validates Cognito access-token signature, issuer, token type, client ID, and the matching signed identity token when needed.
 
-Copy `deploy/api.env.example` to `~/.config/the-club/api.env` and `web/.env.example` to `web/.env.local`. Set the OIDC issuer, audience, JWKS URL, SPA client ID, and registered redirect URI. Set `VITE_CLUB_ID` only when a specific initial club should be selected. Never put a client secret in the browser config. Demo data is available only when `VITE_USE_DEMO_API=true`; otherwise an unconfigured identity provider produces a setup screen rather than falling back to fake data.
+### Cloudflare Tunnel for the home-hosted app
 
-For local user-systemd API startup, copy `deploy/systemd/user/the-club-api.service` to `~/.config/systemd/user/`, protect the API environment file with `chmod 600`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now the-club-api.service`. The local unit also loads `~/.config/the-club/refresh.env` after `api.env` so the existing local PostgreSQL credentials override template placeholders; do not use that shared-secret arrangement for production. The unit is included in this repository but isn’t installed or started automatically.
+The home app can be published through Cloudflare Tunnel without router port forwarding. This uses a host-networked Caddy container to serve the production bundle and proxy `/api` to the loopback-only API; the `cloudflared` container makes the outbound Tunnel connection. Nothing listens publicly on the home network.
 
-For production HTTPS, adapt `deploy/caddy/Caddyfile.example` to your hostname and installation path. Caddy terminates TLS and proxies `/api` to the loopback-only API. Configure the OIDC provider’s allowed callback URI and `WEB_ORIGIN` to the same HTTPS site origin.
+Before starting the Tunnel, add `https://club.ofurey.com/` to the Cognito app client's allowed callback and sign-out URLs. Copy `web/.env.production.example` to `web/.env.production.local`. The API `WEB_ORIGIN` setting accepts a comma-separated list; include both `http://localhost:5173` and `https://club.ofurey.com` if local and public browsers should both work.
 
-### Local Keycloak
-
-The repository includes a development-only Keycloak realm/client import. It registers `the-club-web` as a public PKCE client and maps the `the-club-api` audience. Keycloak is bound to `127.0.0.1:8081`; `start-dev` is for local development only and must not be used as the production identity service.
-
-Install Docker Engine and the Compose plugin, then start Keycloak:
-
-```bash
-cd deploy/keycloak
-cp .env.example .env
-chmod 600 .env
-nano .env
-docker compose --env-file .env up -d
-```
-
-The local realm enables self-registration. From the app, choose **Create an account** to open Keycloak's login page, then use its registration link. If the realm was imported before registration was enabled, turn on **User registration** under **Realm Settings → Login** in the Keycloak admin console; realm imports do not overwrite an existing realm. The local realm has no SMTP server, so mark the new user's email as verified in the Keycloak admin console before signing in to the app. On the first verified OIDC sign-in, the API creates the corresponding app user. Production identity providers must verify email as part of their registration flow; the API rejects unverified identities. To use the seeded demo club, use `refresh-demo-owner@example.invalid` as the Keycloak user's email and mark it verified.
-
-For a one-command local startup, make sure PostgreSQL is running and migrations 001 through 008 are applied. The launcher does not create, migrate, or seed the database. Configure the local environments once:
+In Cloudflare Zero Trust, create a named Tunnel and a public hostname `club.ofurey.com` with service type HTTP and URL `http://127.0.0.1:8085`. Cloudflare creates the DNS record. Copy only the Tunnel token into a private file; never paste it into chat or commit it:
 
 ```bash
 mkdir -p ~/.config/the-club
-cp deploy/api.env.example ~/.config/the-club/api.env
-cp deploy/systemd/user/refresh.env.example ~/.config/the-club/refresh.env
-cp deploy/keycloak/.env.example deploy/keycloak/.env
-chmod 600 ~/.config/the-club/api.env ~/.config/the-club/refresh.env deploy/keycloak/.env
+cp deploy/tunnel/cloudflare-tunnel.env.example ~/.config/the-club/cloudflare-tunnel.env
+chmod 600 ~/.config/the-club/cloudflare-tunnel.env
+nano ~/.config/the-club/cloudflare-tunnel.env
+npm run tunnel:up
 ```
 
-Set the Postgres password in both protected environment files, and set a local Keycloak admin password in `deploy/keycloak/.env`. Then run `npm run dev:local`. It starts Keycloak with Docker Compose or Podman Compose, starts or reuses the API and refresh worker (using matching user-systemd units when installed), and runs Vite in the foreground. It creates `web/.env.local` from the example if needed. Press Ctrl-C to stop Vite and any API/worker processes launched by the script; systemd services and Keycloak remain running. Use `--no-keycloak` when the configured identity provider is already running and `--no-refresh` to omit the background refresh worker. The web app is at `http://localhost:5173`.
+The launcher builds the production web app and starts PostgreSQL, the API, refresh worker, Caddy, and `cloudflared` with Docker Compose. PostgreSQL uses a persistent named volume and publishes its port only on `127.0.0.1:5433`; the API and worker use host networking to reach it. The API still binds to `127.0.0.1:8080` and is not published directly. Docker restart policies manage every application service.
 
-Docker/Podman and PostgreSQL are not included with this repository; both must be installed locally. To start the API and Vite manually instead, use `npm run serve:api` and `npm run dev:web` in separate terminals.
+For an existing host database, back it up before migration. Start the new database container, restore the custom-format dump to port 5433, compare key table counts, then change `DATABASE_URL` in both protected API and refresh environment files to `postgresql://the_club@127.0.0.1:5433/the_club` before starting the API and worker containers. Keep the original host database intact until the containerized app is verified; it can remain stopped or serve as a rollback copy. A fresh container creates an empty database and still needs migrations 001 through 008 applied before app use. Confirm Cognito login and API behavior at `https://club.ofurey.com` before removing older DNS records or the existing Route 53 hosted zone. The `www.ofurey.com` CloudFront record is separate and should be retained if that hostname is still needed.
 
 ## PostgreSQL Integration Test
 

@@ -25,12 +25,19 @@ async function main(): Promise<void> {
   const connectionString = requiredEnvironment("DATABASE_URL");
   const issuer = requiredEnvironment("OIDC_ISSUER");
   const audience = requiredEnvironment("OIDC_AUDIENCE");
+  const cognitoClientId = process.env.OIDC_COGNITO_CLIENT_ID?.trim() || undefined;
+  const requireCognitoProfile = process.env.OIDC_REQUIRE_COGNITO_PROFILE === "true";
   const jwksUrl = requiredEnvironment("OIDC_JWKS_URL");
-  const webOrigin = requiredEnvironment("WEB_ORIGIN");
+  const webOrigins = requiredEnvironment("WEB_ORIGIN").split(",").map((origin) => origin.trim()).filter(Boolean);
+  if (!webOrigins.length) {
+    throw new Error("WEB_ORIGIN must include at least one browser origin.");
+  }
   const port = Number(process.env.API_PORT ?? 8080);
-  const webOriginUrl = new URL(webOrigin);
-  if (webOriginUrl.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(webOriginUrl.hostname)) {
-    throw new Error("WEB_ORIGIN must use HTTPS outside localhost development.");
+  for (const webOrigin of webOrigins) {
+    const webOriginUrl = new URL(webOrigin);
+    if (webOriginUrl.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(webOriginUrl.hostname)) {
+      throw new Error("WEB_ORIGIN must use HTTPS outside localhost development.");
+    }
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("API_PORT must be a valid TCP port.");
@@ -38,7 +45,10 @@ async function main(): Promise<void> {
 
   const pool = new Pool({ connectionString });
   const database = wrapPgLikeClient(pool);
-  const repository = new PostgresClubApiRepository(database);
+  const repository = new PostgresClubApiRepository(
+    database,
+    process.env.OIDC_ALLOW_VERIFIED_EMAIL_RELINK === "true"
+  );
   const emailSender = createSmtpNotificationEmailSender();
   const emailDelivery = emailSender ? new PostgresNotificationEmailDelivery(database, emailSender) : null;
   const officialProvider = new MuslVerifiedLotteryProvider(new MichiganLotteryGraphqlProvider());
@@ -78,10 +88,12 @@ async function main(): Promise<void> {
     verifyToken: createOidcTokenVerifier({
       issuer,
       audience,
+      cognitoClientId,
+      requireCognitoProfile,
       jwksUrl,
       userinfoUrl: process.env.OIDC_USERINFO_URL?.trim() || undefined,
     }),
-    webOrigin,
+    webOrigin: webOrigins,
     logger: true,
   });
 

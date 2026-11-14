@@ -51,6 +51,7 @@ postgresTest(
       "006_source_retention_metadata.sql",
       "007_notification_delivery.sql",
       "008_notification_delivery_leases.sql",
+      "009_user_profile_names.sql",
     ]) {
       const migrationPath = path.resolve(__dirname, "../../database/migrations", migrationName);
       await client.query(fs.readFileSync(migrationPath, "utf8"));
@@ -87,6 +88,9 @@ postgresTest(
       email: `${ownerId}@integration.test`,
       emailVerified: true as const,
       displayName: "OIDC Integration Owner",
+      username: "integration.owner",
+      firstName: "Integration",
+      lastName: "Owner",
     });
     assert.equal(linkedOwner.id, ownerId);
     assert.equal(linkedOwner.authSubject, `oidc-${ownerId}`);
@@ -95,11 +99,35 @@ postgresTest(
       email: `signup-${randomUUID()}@integration.test`,
       emailVerified: true as const,
       displayName: "Newly Registered Member",
+      username: "new.member",
+      firstName: "Newly Registered",
+      lastName: "Member",
     };
     const createdUser = await apiRepository.provisionOidcUser(newIdentity);
     assert.equal(createdUser.authSubject, newIdentity.subject);
     assert.equal(createdUser.email, newIdentity.email);
     assert.equal(createdUser.status, "active");
+    assert.equal(createdUser.username, "new.member");
+    assert.equal(createdUser.firstName, "Newly Registered");
+    assert.equal(createdUser.lastName, "Member");
+    await assert.rejects(apiRepository.provisionOidcUser({
+      ...newIdentity,
+      subject: `duplicate-${randomUUID()}`,
+      email: `duplicate-${randomUUID()}@integration.test`,
+      username: "NEW.MEMBER",
+    }), /username is already in use/i);
+    const replacementIdentity = {
+      ...newIdentity,
+      subject: `cognito-${newIdentity.subject}`,
+    };
+    await assert.rejects(
+      apiRepository.provisionOidcUser(replacementIdentity),
+      /already linked to another sign-in identity/
+    );
+    const migrationRepository = new PostgresClubApiRepository(testDatabaseClient, true);
+    const relinkedUser = await migrationRepository.provisionOidcUser(replacementIdentity);
+    assert.equal(relinkedUser.id, createdUser.id);
+    assert.equal(relinkedUser.authSubject, replacementIdentity.subject);
     const unverifiedIdentity = {
       ...newIdentity,
       subject: `unverified-${randomUUID()}`,
@@ -107,6 +135,17 @@ postgresTest(
       emailVerified: false,
     } as unknown as OidcIdentity;
     await assert.rejects(apiRepository.provisionOidcUser(unverifiedIdentity), /verified OIDC identity/);
+
+    const linkedMember = await apiRepository.provisionOidcUser({
+      subject: `oidc-${memberId}`,
+      email: `${memberId}@integration.test`,
+      emailVerified: true,
+      displayName: "Integration Member",
+      username: "integration.member",
+      firstName: "Integration",
+      lastName: "Member",
+    });
+    assert.equal(linkedMember.id, memberId);
 
     const service = new ClubService(repository);
     const club = await service.createClub({
@@ -121,6 +160,10 @@ postgresTest(
     await assert.rejects(apiRepository.closeAccount(ownerId), /close your active clubs/i);
     const membership = await service.requestMembership({ clubId: club.club.id, userId: memberId });
     assert.equal(membership.status, "active");
+    const publicOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
+    assert.equal(publicOverview?.members.find((item) => item.userId === ownerId)?.displayName, "integration.owner");
+    assert.equal(publicOverview?.members.find((item) => item.userId === ownerId)?.email, "");
+    assert.equal(publicOverview?.members.find((item) => item.userId === memberId)?.displayName, "integration.member");
     assert.deepEqual(await apiRepository.listUserClubs(ownerId), [{ id: club.club.id, name: club.club.name, visibility: "public", role: "creator" }]);
     assert.deepEqual(await apiRepository.listUserClubs(randomUUID()), []);
 
@@ -143,7 +186,9 @@ postgresTest(
       visibility: "private",
       membershipStatus: "pending",
     }]);
-    assert.equal((await apiRepository.listMembershipRequests(ownerId, searchableClub.club.id))[0].userId, memberId);
+    const membershipRequests = await apiRepository.listMembershipRequests(ownerId, searchableClub.club.id);
+    assert.equal(membershipRequests[0].userId, memberId);
+    assert.equal(membershipRequests[0].displayName, "Integration Member");
     await assert.rejects(apiRepository.listMembershipRequests(memberId, searchableClub.club.id), /not an active member/);
 
     assert.equal((await apiRepository.approveMembership(ownerId, searchableClub.club.id, memberId)).status, "active");
@@ -186,6 +231,10 @@ postgresTest(
     });
     assert.equal(updatedClub?.name, "Updated Postgres Integration Club");
     assert.equal(updatedClub?.visibility, "private");
+    const privateOverview = await apiRepository.getClubOverview(ownerId, club.club.id);
+    assert.equal(privateOverview?.members.find((item) => item.userId === ownerId)?.displayName, "Integration Owner");
+    assert.equal(privateOverview?.members.find((item) => item.userId === ownerId)?.email, `${ownerId}@integration.test`);
+    assert.equal(privateOverview?.members.find((item) => item.userId === memberId)?.displayName, "Integration Member");
     await assert.rejects(apiRepository.updateClubSettings(memberId, club.club.id, {
       name: "Unauthorized Change",
       description: null,

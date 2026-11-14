@@ -13,6 +13,8 @@ class ApiResponseError extends Error {
 class OidcHttpClubApi implements ClubApi {
   readonly mode = "oidc" as const;
   private readonly userManager: UserManager;
+  private readonly clientId: string;
+  private readonly postLogoutRedirectUri: string;
   private initialization?: Promise<boolean>;
 
   constructor(
@@ -21,6 +23,8 @@ class OidcHttpClubApi implements ClubApi {
     settings: UserManagerSettings
   ) {
     this.userManager = new UserManager(settings);
+    this.clientId = settings.client_id;
+    this.postLogoutRedirectUri = settings.post_logout_redirect_uri ?? settings.redirect_uri;
   }
 
   initialize(): Promise<boolean> {
@@ -53,6 +57,15 @@ class OidcHttpClubApi implements ClubApi {
   }
 
   async signOut(): Promise<void> {
+    const cognitoDomain = import.meta.env.VITE_OIDC_COGNITO_DOMAIN?.trim();
+    if (cognitoDomain) {
+      const logoutUrl = new URL("/logout", cognitoDomain);
+      logoutUrl.searchParams.set("client_id", this.clientId);
+      logoutUrl.searchParams.set("logout_uri", this.postLogoutRedirectUri);
+      await this.userManager.removeUser();
+      window.location.assign(logoutUrl.href);
+      return;
+    }
     await this.userManager.signoutRedirect();
   }
 
@@ -234,6 +247,9 @@ class OidcHttpClubApi implements ClubApi {
         ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
         ...init.headers,
         Authorization: `Bearer ${user.access_token}`,
+        ...(import.meta.env.VITE_OIDC_COGNITO_DOMAIN && user.id_token
+          ? { "X-Identity-Token": user.id_token }
+          : {}),
       },
     });
     if (!response.ok) {
