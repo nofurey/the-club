@@ -84,7 +84,7 @@ function createRepository(): ClubApiRepository & { createdBy: string | null; upd
       this.ownershipTarget = newOwnerUserId;
     },
     async searchClubs() {
-      return [{ id: club.id, name: club.name, visibility: "private", membershipStatus: null }];
+      return [{ id: club.id, name: club.name, visibility: "private", payoutType: null, thresholdAmount: null, membershipStatus: null }];
     },
     async requestMembership(userId) {
       this.membershipRequestedBy = userId;
@@ -312,7 +312,7 @@ test("discovery and membership requests require authentication and use the verif
     headers: { authorization: "Bearer valid-token" },
   });
   assert.equal(discovered.statusCode, 200);
-  assert.deepEqual(discovered.json().clubs[0], { id: club.id, name: club.name, visibility: "private", membershipStatus: null });
+  assert.deepEqual(discovered.json().clubs[0], { id: club.id, name: club.name, visibility: "private", payoutType: null, thresholdAmount: null, membershipStatus: null });
 
   const joined = await server.inject({
     method: "POST",

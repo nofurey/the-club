@@ -197,20 +197,24 @@ export class PostgresClubApiRepository implements ClubApiRepository {
     const { rows } = await this.client.query(
       `SELECT c.id, c.name, c.visibility, c.description, c.motto,
               caller.status AS membership_status,
-              COUNT(active_members.id)::int AS member_count
+              COUNT(active_members.id)::int AS member_count,
+              pc.type AS payout_type,
+              tr.threshold_amount
        FROM clubs c
        LEFT JOIN club_memberships caller ON caller.club_id = c.id AND caller.user_id = $1
        LEFT JOIN club_memberships active_members ON active_members.club_id = c.id AND active_members.status = 'active'
+       LEFT JOIN payout_configurations pc ON pc.id = c.payout_configuration_id
+       LEFT JOIN threshold_rules tr ON tr.id = c.threshold_rule_id
        WHERE c.status = 'active'
          AND (c.visibility = 'public' OR c.allow_search = true)
          AND c.name ILIKE $2
-       GROUP BY c.id, caller.status
+       GROUP BY c.id, caller.status, pc.type, tr.threshold_amount
        ORDER BY c.name
        LIMIT 50`,
       [userId, `%${query}%`]
     );
     return rows.map((row) => row.visibility === "private"
-      ? { id: row.id, name: row.name, visibility: "private", membershipStatus: row.membership_status ?? null }
+      ? { id: row.id, name: row.name, visibility: "private", payoutType: row.payout_type ?? null, thresholdAmount: row.threshold_amount ? Number(row.threshold_amount) : null, membershipStatus: row.membership_status ?? null }
       : {
           id: row.id,
           name: row.name,
@@ -218,6 +222,8 @@ export class PostgresClubApiRepository implements ClubApiRepository {
           description: row.description ?? null,
           motto: row.motto ?? null,
           memberCount: Number(row.member_count),
+          payoutType: row.payout_type ?? null,
+          thresholdAmount: row.threshold_amount ? Number(row.threshold_amount) : null,
           membershipStatus: row.membership_status ?? null,
         });
   }

@@ -193,7 +193,40 @@ export const demoClubApi: ClubApi = {
     return [{ id: club.id, name: club.name, visibility: club.visibility, role: "creator" as const }];
   },
 
-  async searchClubs(): Promise<ClubDiscoverySummary[]> { return []; },
+  async searchClubs(): Promise<ClubDiscoverySummary[]> {
+    return [
+      {
+        id: "demo-club-1",
+        name: "Lucky Numbers United",
+        visibility: "public" as const,
+        description: "A friendly club for lottery enthusiasts",
+        motto: "Together we play",
+        memberCount: 12,
+        payoutType: "equal_shares" as const,
+        thresholdAmount: 100,
+        membershipStatus: null,
+      },
+      {
+        id: "demo-club-2",
+        name: "Powerball Collective",
+        visibility: "public" as const,
+        description: null,
+        motto: "Multiply your luck",
+        memberCount: 8,
+        payoutType: "proportion_drawing_specific" as const,
+        thresholdAmount: 250,
+        membershipStatus: null,
+      },
+      {
+        id: "demo-club-3",
+        name: "Private Winners Circle",
+        visibility: "private" as const,
+        payoutType: "proportion_all_drawings" as const,
+        thresholdAmount: 500,
+        membershipStatus: null,
+      },
+    ];
+  },
   async requestMembership(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },
   async getMembershipRequests(): Promise<MembershipRequestView[]> { return []; },
   async approveMembership(): Promise<MembershipActionResult> { throw new Error("Membership changes require an authenticated session."); },

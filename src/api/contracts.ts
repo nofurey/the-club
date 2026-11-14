@@ -114,6 +114,8 @@ export type ClubDiscoverySummary =
       id: string;
       name: string;
       visibility: "private";
+      payoutType: PayoutType | null;
+      thresholdAmount: number | null;
       membershipStatus: MembershipStatus | null;
     }
   | {
@@ -123,6 +125,8 @@ export type ClubDiscoverySummary =
       description: string | null;
       motto: string | null;
       memberCount: number;
+      payoutType: PayoutType | null;
+      thresholdAmount: number | null;
       membershipStatus: MembershipStatus | null;
     };
 

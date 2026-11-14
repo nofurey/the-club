@@ -175,6 +175,10 @@ h1, h2, p { margin-top: 0; }
 .spend-track span { display: block; height: 100%; border-radius: inherit; background: #70ae93; }
 .spend-item:nth-child(2n) .spend-track span { background: #df896c; }
 .spend-total { color: #687b72; font-family: "DM Mono", monospace; font-size: 9px; text-align: right; }
+.club-rules-section { padding-top: 12px; border-top: 1px solid var(--line); margin-bottom: 8px; }
+.rules-label { color: #829189; font-family: "DM Mono", monospace; font-size: 8px; text-transform: uppercase; margin-bottom: 6px; }
+.rules-detail { color: #7b8b83; font-size: 9px; margin-bottom: 4px; }
+.rules-detail strong { color: var(--ink); font-weight: 600; }
 .snapshot-note { display: flex; align-items: center; gap: 7px; margin-top: 12px; color: #88968f; font-size: 9px; }
 .results-strip { display: grid; grid-template-columns: minmax(180px, 0.9fr) minmax(0, 1.4fr) 34px; align-items: center; gap: 20px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,0.73); }
 .results-strip-copy h2 { margin: 0 0 4px; color: var(--ink); font-family: "Newsreader", serif; font-size: 19px; font-weight: 500; }
@@ -241,6 +245,14 @@ td:first-child { color: var(--ink); }
 .discovery-club-title h2 { overflow: hidden; margin: 0; color: var(--ink); font-family: "Newsreader", serif; font-size: 18px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .discovery-club-title > span { flex: 0 0 auto; color: #829189; font-family: "DM Mono", monospace; font-size: 8px; text-transform: uppercase; }
 .discovery-club-copy p { margin: 5px 0 0; overflow: hidden; color: #7b8b83; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.discovery-payout-row { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.discovery-payout-strategy { margin: 0 !important; color: #5b7b73; font-size: 9px !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.discovery-payout-strategy strong { color: #326b59; font-weight: 600; }
+.discovery-threshold { margin: 0 !important; color: #5b7b73; font-size: 9px !important; white-space: nowrap; }
+.payout-info-icon { position: relative; flex: 0 0 auto; cursor: help; color: #829189; display: flex; align-items: center; }
+.payout-info-icon:hover { color: #5b7b73; }
+.payout-tooltip { display: none; position: absolute; top: 24px; left: -10px; min-width: 200px; max-width: 240px; background: #35584e; color: white; font-size: 8px; line-height: 1.3; padding: 6px 8px; border-radius: 3px; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-family: "DM Mono", monospace; }
+.payout-info-icon:hover .payout-tooltip { display: block; }
 .discovery-empty { width: min(620px, 100%); padding: 18px 0; color: #7b8b83; font-size: 11px; }
 .membership-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 0 12px; color: #829189; font-size: 10px; }
 .request-list { margin: 0 0 18px; border-top: 1px solid var(--line); }

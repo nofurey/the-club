@@ -73,6 +73,19 @@ const formatDate = (date: string, options: Intl.DateTimeFormatOptions = { month:
 
 const lotteryName = (lottery: LotteryType) => lottery === "powerball" ? "Powerball" : "Mega Millions";
 const bonusName = (lottery: LotteryType) => lottery === "powerball" ? "Powerball" : "Mega Ball";
+const payoutStrategyName = (payoutType: string | null | undefined) => {
+  if (!payoutType) return "Unknown strategy";
+  if (payoutType === "equal_shares") return "Equal shares";
+  if (payoutType === "proportion_drawing_specific") return "Proportional (drawing)";
+  if (payoutType === "proportion_all_drawings") return "Proportional (all)";
+  return payoutType;
+};
+const payoutStrategyDescription = (payoutType: string | null | undefined) => {
+  if (payoutType === "equal_shares") return "Each member gets an equal share of winnings, regardless of how much they contributed.";
+  if (payoutType === "proportion_drawing_specific") return "Winnings are split based on each member's contribution to that specific drawing.";
+  if (payoutType === "proportion_all_drawings") return "Winnings are split based on each member's total contribution across all drawings.";
+  return "Payout strategy not configured.";
+};
 const userInitials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || "ME";
 
 function readerStorage(): Storage | null {
@@ -535,6 +548,11 @@ function OverviewView({ data, onNavigate }: { data: ClubOverview; onNavigate: (v
               </div>
             ))}
           </div>
+          <div className="club-rules-section">
+            <div className="rules-label">CLUB RULES</div>
+            <div className="rules-detail"><strong>Payout strategy:</strong> {payoutStrategyName(data.payoutConfiguration.type)}</div>
+            <div className="rules-detail"><strong>Threshold:</strong> {data.thresholdRule.method === "pooled" ? "Pooled" : "Individual"} · {money(data.thresholdRule.thresholdAmount)}</div>
+          </div>
           <div className="snapshot-note"><LockKeyhole size={14} />Members only · Private club</div>
         </aside>
       </section>
@@ -713,6 +731,14 @@ function DiscoveryView({ api, onOpenClub }: { api: ClubApi; onOpenClub: (clubId:
           <div className="discovery-club-copy">
             <div className="discovery-club-title"><h2>{item.name}</h2><span>{item.visibility}</span></div>
             {item.visibility === "public" && <p>{item.description || item.motto || `${item.memberCount} active ${item.memberCount === 1 ? "member" : "members"}`}</p>}
+            <div className="discovery-payout-row">
+              <p className="discovery-payout-strategy"><strong>Payout:</strong> {payoutStrategyName(item.payoutType)}</p>
+              <div className="payout-info-icon" title={payoutStrategyDescription(item.payoutType)}>
+                <CircleHelp size={14} />
+                <div className="payout-tooltip">{payoutStrategyDescription(item.payoutType)}</div>
+              </div>
+              {item.thresholdAmount && <p className="discovery-threshold"> · Threshold: {money(item.thresholdAmount)}</p>}
+            </div>
           </div>
           <button className="button button-secondary" type="button" disabled={pending || api.mode !== "oidc"} onClick={() => void openClub(item.id)}>{api.mode === "demo" ? "Preview only" : label}</button>
         </article>;
